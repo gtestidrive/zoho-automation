@@ -1,0 +1,13 @@
+// This configures TypeScript for this Playwright project.
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "types": ["node", "@playwright/test"]
+  },
+  "include": ["playwright.config.ts", "pages/**/*.ts", "services/**/*.ts", "tests/**/*.ts"]
+}
