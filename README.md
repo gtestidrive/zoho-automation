@@ -96,4 +96,4 @@ Run the cross-account test in PowerShell:
 npx.cmd playwright test tests/backupdrive.spec.ts --grep "backs up a Zoho Native WorkDrive folder" --headed --workers=1
 ```
 
-This runs the complete folder-to-C2C flow: create a unique folder and upload a fresh document with the WorkDrive API, start the matching user's C2C backup, wait for completion, and check the snapshot for the folder.                                                                                                                                                         
+This runs the complete folder-to-C2C flow: create a unique folder and upload a fresh document with the WorkDrive API, start the matching user's C2C backup, wait for completion, and check the snapshot for the folder.
