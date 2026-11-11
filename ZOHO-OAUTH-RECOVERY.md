@@ -16,7 +16,7 @@ $env:ZOHO_WORKDRIVE_CLIENT_ID = $oauth.clientId
 $env:ZOHO_WORKDRIVE_CLIENT_SECRET = $oauth.clientSecret
 $env:SETUP_ZOHO_WORKDRIVE_OAUTH = '1'
 try {
-    npx.cmd playwright test tests/zoho-native-auth.spec.ts --headed --workers=1
+    npx.cmd playwright test tests/api/drive/zoho-native-auth.spec.ts --headed --workers=1
 } finally {
     Remove-Item Env:SETUP_ZOHO_WORKDRIVE_OAUTH -ErrorAction SilentlyContinue
     Remove-Item Env:ZOHO_WORKDRIVE_CLIENT_ID -ErrorAction SilentlyContinue
@@ -28,7 +28,12 @@ try {
 In the browser, confirm you are signed in to the intended Zoho account and approve the requested WorkDrive permissions. On success, setup saves the new refresh token to `.auth/zoho-workdrive-oauth.json`. Then rerun the backup:
 
 ```powershell
-npx.cmd playwright test tests/backupdrive.spec.ts --grep "creates and backs up a Zoho Native WorkDrive folder" --headed --workers=1
+$env:RUN_ZOHO_BACKUP_SUITE = '1'
+try {
+    npx.cmd playwright test tests/test_backup.spec.ts --grep "Drive:" --headed --workers=1
+} finally {
+    Remove-Item Env:RUN_ZOHO_BACKUP_SUITE -ErrorAction SilentlyContinue
+}
 ```
 
 If the token file is missing or does not contain the OAuth client settings, set `ZOHO_WORKDRIVE_CLIENT_ID` and `ZOHO_WORKDRIVE_CLIENT_SECRET` from Zoho API Console before running setup. Never share or commit the `.auth/` files. If Zoho reports an authorization or redirect URI error, verify the selected account, OAuth app, regional Accounts URL, and the exact registered redirect URI (`http://localhost:43127/oauth/callback`).

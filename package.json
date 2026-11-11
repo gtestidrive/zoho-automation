@@ -13,5 +13,8 @@
     "@playwright/test": "^1.55.0",
     "@types/node": "^22.15.0",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
   }
 }

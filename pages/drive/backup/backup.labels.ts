@@ -8,7 +8,6 @@ export const backupLabels = {
   selectUserButton: 'Select User',
   searchButton: 'Search',
   loading: 'Loading...',
-  storage: 'Storage',
   myFolderBreadcrumb: 'My Folder',
   nextPageButton: 'Next page',
   previousPageButton: 'Previous page',

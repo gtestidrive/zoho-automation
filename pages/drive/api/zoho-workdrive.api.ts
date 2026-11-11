@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from '@playwright/test';
 
 type WorkDriveSettings = {
@@ -36,7 +37,20 @@ export type WorkDriveEntry = {
   path: string;
 };
 
+export type WorkDriveTeamFolder = {
+  id: string;
+  name: string;
+  status: string;
+};
+
+export type WorkDriveTeamFolderFixture = {
+  folderName: string;
+  textFileName: string;
+  imageFileName: string;
+};
+
 const workDrivePageSize = 100;
+const teamFolderPageSize = 50;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -143,7 +157,7 @@ export class ZohoWorkDriveApi {
       const authorizationParameters: Record<string, string> = {
         client_id: this.settings.clientId,
         response_type: 'code',
-        scope: 'WorkDrive.files.CREATE,WorkDrive.files.READ,WorkDrive.team.READ,AaaServer.profile.READ',
+        scope: 'WorkDrive.files.CREATE,WorkDrive.files.READ,WorkDrive.team.READ,WorkDrive.teamfolders.READ,AaaServer.profile.READ',
         redirect_uri: this.settings.redirectUri,
         access_type: 'offline',
         prompt: 'consent',
@@ -206,6 +220,59 @@ export class ZohoWorkDriveApi {
   // Create a folder in the configured team's My Folders root and return its WorkDrive resource ID.
   async createFolder(name: string): Promise<string> {
     const parentFolderId = await this.getParentFolderId();
+    return this.createFolderUnderParent(parentFolderId, name);
+  }
+
+  async createTeamFolder(teamFolderId: string): Promise<WorkDriveTeamFolderFixture> {
+    if (!teamFolderId.trim()) {
+      throw new Error('A Zoho WorkDrive Team Folder ID is required to create a folder.');
+    }
+
+    const runStamp = new Date().toISOString().replace(/[-:T.Z]/g, '');
+    const folderName = `test-${runStamp}`;
+    const textFileName = `${folderName}.txt`;
+    const imageFileName = `${folderName}.png`;
+    const folderId = await this.createFolderUnderParent(teamFolderId, folderName);
+    await this.uploadFile(
+      folderId,
+      textFileName,
+      new Blob([`Team Folder backup test file created at ${new Date().toISOString()}.`], {
+        type: 'text/plain',
+      }),
+    );
+    await this.uploadFile(
+      folderId,
+      imageFileName,
+      new Blob([Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        'base64',
+      )], { type: 'image/png' }),
+    );
+    console.log(`[Zoho WorkDrive] Created folder "${folderName}" with ${textFileName} and ${imageFileName} in Team Folder ${teamFolderId}.`);
+    return { folderName, textFileName, imageFileName };
+  }
+
+  private async uploadFile(parentFolderId: string, fileName: string, content: Blob): Promise<void> {
+    const form = new FormData();
+    form.set('parent_id', parentFolderId);
+    form.set('filename', fileName);
+    form.set('content', content, fileName);
+
+    const response = await fetch(`${this.settings.apiUrl}/upload`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Zoho-oauthtoken ${await this.getAccessToken()}`,
+        Accept: 'application/vnd.api+json',
+      },
+      body: form,
+    });
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      throw new Error(`Zoho WorkDrive file upload failed for "${fileName}" (HTTP ${response.status}): ${responseError(body)}`);
+    }
+  }
+
+  private async createFolderUnderParent(parentFolderId: string, name: string): Promise<string> {
     const response = await fetch(`${this.settings.apiUrl}/files`, {
       method: 'POST',
       headers: {
@@ -273,6 +340,93 @@ export class ZohoWorkDriveApi {
 
     await visitFolder(rootFolderId, '');
     return entries;
+  }
+
+  async listTeamFolders(): Promise<WorkDriveTeamFolder[]> {
+    const url = `${this.settings.apiUrl}/teams/${encodeURIComponent(this.settings.teamId)}/teamfolders`;
+    const records: Array<Record<string, unknown> & { id: string }> = [];
+    for (let offset = 0; ; offset += teamFolderPageSize) {
+      const pageUrl = new URL(url);
+      pageUrl.searchParams.set('page[limit]', String(teamFolderPageSize));
+      pageUrl.searchParams.set('page[offset]', String(offset));
+      const body = await this.getTeamFolderJson(pageUrl);
+      const page = dataItems(body);
+      records.push(...page);
+      if (page.length < teamFolderPageSize) {
+        break;
+      }
+    }
+
+    return records.map((record) => {
+      if (!isRecord(record.attributes)) {
+        throw new Error(`Zoho WorkDrive Team Folder ${record.id} has no attributes (${describeDataShape(record)}).`);
+      }
+      const name = firstString(record.attributes, ['name']);
+      const status = firstString(record.attributes, ['status']);
+      if (!name || !status) {
+        throw new Error(`Zoho WorkDrive Team Folder ${record.id} has no name or status (${describeDataShape(record.attributes)}).`);
+      }
+      return { id: record.id, name, status };
+    });
+  }
+
+  async listTeamFolderFiles(teamFolderId: string): Promise<WorkDriveEntry[]> {
+    const entries: WorkDriveEntry[] = [];
+    const visitedFolderIds = new Set([teamFolderId]);
+
+    const visitFolder = async (folderId: string, parentPath: string, isTeamFolderRoot: boolean): Promise<void> => {
+      for (let offset = 0; ; offset += teamFolderPageSize) {
+        const resourcePath = isTeamFolderRoot
+          ? `/teamfolders/${encodeURIComponent(folderId)}/files`
+          : `/files/${encodeURIComponent(folderId)}/files`;
+        const url = new URL(`${this.settings.apiUrl}${resourcePath}`);
+        url.searchParams.set('page[limit]', String(teamFolderPageSize));
+        url.searchParams.set('page[offset]', String(offset));
+        const page = dataItems(await this.getTeamFolderJson(url));
+
+        for (const item of page) {
+          if (!isRecord(item.attributes)) {
+            throw new Error(`Zoho WorkDrive item ${item.id} has no attributes (${describeDataShape(item)}).`);
+          }
+          const name = firstString(item.attributes, ['name']);
+          const isFolder = item.attributes.is_folder ?? item.attributes.isFolder;
+          if (!name || typeof isFolder !== 'boolean') {
+            throw new Error(`Zoho WorkDrive item ${item.id} has no name or folder indicator (${describeDataShape(item.attributes)}).`);
+          }
+
+          const path = parentPath ? `${parentPath}\\${name}` : name;
+          entries.push({ id: item.id, name, type: isFolder ? 'Folder' : 'File', path });
+          if (isFolder && !visitedFolderIds.has(item.id)) {
+            visitedFolderIds.add(item.id);
+            await visitFolder(item.id, path, false);
+          }
+        }
+
+        if (page.length < teamFolderPageSize) {
+          break;
+        }
+      }
+    };
+
+    await visitFolder(teamFolderId, '', true);
+    return entries;
+  }
+
+  private async getTeamFolderJson(url: URL): Promise<Record<string, unknown>> {
+    const accessToken = await this.getAccessToken();
+    const { response, body } = await this.requestJson(url, {
+      headers: {
+        Authorization: `Zoho-oauthtoken ${accessToken}`,
+        Accept: 'application/vnd.api+json',
+      },
+    }, true);
+    if (!response.ok) {
+      throw new Error(`Zoho WorkDrive Team Folder request failed (HTTP ${response.status}): ${responseError(body)}`);
+    }
+    if (!isRecord(body)) {
+      throw new Error('Zoho WorkDrive Team Folder request returned an invalid response.');
+    }
+    return body;
   }
 
   private async listFolderContents(folderId: string): Promise<Array<Record<string, unknown> & { id: string }>> {
@@ -415,27 +569,6 @@ export class ZohoWorkDriveApi {
     throw new Error('Zoho WorkDrive found no current team member with a My Folders space for the authorized user.');
   }
 
-  // Upload the backup fixture directly to WorkDrive; the UI test later checks whether C2C captured it.
-  async uploadTextFile(parentFolderId: string, fileName: string, contents: string): Promise<void> {
-    const form = new FormData();
-    form.set('parent_id', parentFolderId);
-    form.set('filename', fileName);
-    form.set('content', new Blob([contents], { type: 'text/plain' }), fileName);
-
-    const response = await fetch(`${this.settings.apiUrl}/upload`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Zoho-oauthtoken ${await this.getAccessToken()}`,
-        Accept: 'application/vnd.api+json',
-      },
-      body: form,
-    });
-    const body: unknown = await response.json();
-    if (!response.ok) {
-      throw new Error(`Zoho WorkDrive file upload failed (HTTP ${response.status}): ${responseError(body)}`);
-    }
-  }
-
   private validateClientSettings(clientId: string, clientSecret: string): void {
     if (!clientId || !clientSecret) {
       throw new Error('OAuth client settings are not available. Set ZOHO_WORKDRIVE_CLIENT_ID and ZOHO_WORKDRIVE_CLIENT_SECRET and rerun the OAuth setup once.');
@@ -511,12 +644,11 @@ export class ZohoWorkDriveApi {
   }
 
   private async requestToken(parameters: Record<string, string>): Promise<OAuthTokenResponse> {
-    const response = await fetch(new URL('/oauth/v2/token', this.settings.accountUrl), {
+    const { response, body } = await this.requestJson(new URL('/oauth/v2/token', this.settings.accountUrl), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(parameters),
-    });
-    const body: unknown = await response.json();
+    }, parameters.grant_type === 'refresh_token');
     if (!response.ok) {
       throw new Error(`Zoho OAuth token request failed (HTTP ${response.status}): ${responseError(body)}`);
     }
@@ -536,6 +668,42 @@ export class ZohoWorkDriveApi {
           ? { expires_in: Number(body.expires_in) }
           : {}),
     };
+  }
+
+  private async requestJson(
+    url: URL,
+    init: RequestInit,
+    retryTransportErrors: boolean,
+  ): Promise<{ response: Response; body: unknown }> {
+    const attempts = retryTransportErrors ? 3 : 1;
+    const operation = `${init.method ?? 'GET'} ${url.origin}${url.pathname}`;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
+        const body: unknown = await response.json();
+        return { response, body };
+      } catch (error) {
+        const cause = isRecord(error) && isRecord(error.cause) ? error.cause : error;
+        const code = isRecord(cause) && typeof cause.code === 'string' ? cause.code : undefined;
+        const transient = code !== undefined && [
+          'ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN',
+          'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT',
+          'UND_ERR_BODY_TIMEOUT',
+        ].includes(code) || error instanceof Error && error.name === 'TimeoutError';
+        if (!transient || attempt >= attempts) {
+          throw new Error(
+            `Zoho WorkDrive ${operation} failed after ${attempt} attempt(s)`
+            + ` (${code ?? (error instanceof Error ? error.name : 'unknown error')}).`,
+            { cause: error },
+          );
+        }
+        console.warn(
+          `[Zoho WorkDrive] ${operation} connection interrupted (${code ?? 'TimeoutError'}); `
+          + `retrying (${attempt + 1}/${attempts}).`,
+        );
+        await delay(attempt * 1_000);
+      }
+    }
   }
 }
 

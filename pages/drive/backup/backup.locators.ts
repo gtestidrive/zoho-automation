@@ -19,7 +19,13 @@ export class DriveBackupLocators {
   readonly snapshotNavigation: Locator;
   readonly snapshotNextPageButton: Locator;
   readonly snapshotPreviousPageButton: Locator;
-  readonly storageValue: Locator;
+  readonly snapshotExportButton: Locator;
+  readonly exportDialog: Locator;
+  readonly selectedItemsRadio: Locator;
+  readonly confirmExportButton: Locator;
+  readonly exportsTab: Locator;
+  readonly exportsTable: Locator;
+  readonly exportsLoading: Locator;
 
   constructor(private readonly page: Page) {
     this.main = page.getByRole('main', { name: backupLabels.main });
@@ -39,9 +45,13 @@ export class DriveBackupLocators {
     this.snapshotNavigation = this.snapshotPanel.getByRole('navigation');
     this.snapshotNextPageButton = this.snapshotPanel.getByRole('button', { name: backupLabels.nextPageButton });
     this.snapshotPreviousPageButton = this.snapshotPanel.getByRole('button', { name: backupLabels.previousPageButton });
-    this.storageValue = this.main
-      .getByText(backupLabels.storage, { exact: true })
-      .locator('xpath=following-sibling::p[1]');
+    this.snapshotExportButton = this.main.getByRole('button', { name: /^export$/i });
+    this.exportDialog = this.page.getByRole('dialog', { name: /^export$/i });
+    this.selectedItemsRadio = this.exportDialog.getByRole('radio', { name: /^selected items/i });
+    this.confirmExportButton = this.exportDialog.getByRole('button', { name: /^export$/i });
+    this.exportsTab = this.main.getByRole('tab', { name: /^exports?$/i });
+    this.exportsTable = this.main.getByRole('table').last();
+    this.exportsLoading = this.exportsTable.getByText(backupLabels.loading, { exact: true });
   }
 
   userRows(): Locator {
@@ -56,16 +66,16 @@ export class DriveBackupLocators {
     return row.getByRole('cell');
   }
 
-  rowAt(table: Locator, index: number): Locator {
-    return this.tableRows(table).nth(index);
-  }
-
   cellAt(row: Locator, index: number): Locator {
     return this.rowCells(row).nth(index);
   }
 
   historyRows(): Locator {
     return this.historyTable.getByRole('row');
+  }
+
+  exportRows(): Locator {
+    return this.exportsTable.getByRole('row');
   }
 
   userSelector(panel: Locator, name: string): Locator {
@@ -86,15 +96,6 @@ export class DriveBackupLocators {
 
   pageRange(panel: Locator): Locator {
     return panel.getByText(backupPatterns.pagination);
-  }
-
-  pageButton(panel: Locator, direction: 'next' | 'previous'): Locator {
-    const name = direction === 'next' ? backupLabels.nextPageButton : backupLabels.previousPageButton;
-    return panel.getByRole('button', { name });
-  }
-
-  snapshotFolderCell(name: string): Locator {
-    return this.snapshotTable.getByRole('cell', { name, exact: true });
   }
 
   snapshotBreadcrumb(name: string): Locator {

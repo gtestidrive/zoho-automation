@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ZohoWorkDriveApi } from '../services/zoho-workdrive.api';
+import { ZohoWorkDriveApi } from '../../../pages/drive/api/zoho-workdrive.api';
 
 // These tests stub Zoho HTTP responses so API parsing, token use, and team selection are deterministic.
 async function withMockedWorkDrive(
@@ -115,6 +115,56 @@ test('resolves the My Folders parent ID before creating a folder', async () => {
   });
 });
 
+test('creates a folder with a text file and PNG inside the selected Team Folder', async () => {
+  let createFolderBody = '';
+  const uploads: FormData[] = [];
+
+  await withMockedWorkDrive((url, init) => {
+    if (url.endsWith('/files') && init?.method === 'POST') {
+      createFolderBody = String(init.body);
+      return new Response(JSON.stringify({ data: { id: 'created-folder' } }), { status: 200 });
+    }
+    if (url.endsWith('/upload') && init?.method === 'POST') {
+      if (!(init.body instanceof FormData)) {
+        throw new Error('Expected file uploads to use multipart form data.');
+      }
+      uploads.push(init.body);
+      return new Response(JSON.stringify({ data: { id: `created-file-${uploads.length}` } }), { status: 200 });
+    }
+    return undefined;
+  }, async (tokenPath) => {
+    const api = createApi(tokenPath, 'test-team');
+    const fixture = await api.createTeamFolder('team-folder-id');
+
+    expect(fixture.folderName).toMatch(/^test-\d+$/);
+    expect(fixture.textFileName).toBe(`${fixture.folderName}.txt`);
+    expect(fixture.imageFileName).toBe(`${fixture.folderName}.png`);
+    expect(JSON.parse(createFolderBody)).toEqual({
+      data: {
+        attributes: { parent_id: 'team-folder-id', name: fixture.folderName },
+        type: 'files',
+      },
+    });
+    expect(uploads).toHaveLength(2);
+    const textFile = uploads.find((form) => form.get('filename') === fixture.textFileName);
+    const imageFile = uploads.find((form) => form.get('filename') === fixture.imageFileName);
+    expect(textFile?.get('parent_id')).toBe('created-folder');
+    expect(imageFile?.get('parent_id')).toBe('created-folder');
+    const textContent = textFile?.get('content');
+    const imageContent = imageFile?.get('content');
+    if (!(textContent instanceof Blob) || !(imageContent instanceof Blob)) {
+      throw new Error('Team Folder fixture uploads must include text and image blobs.');
+    }
+    expect(textContent.type).toBe('text/plain');
+    expect(await textContent.text()).toContain('Team Folder backup test file');
+    expect(imageContent.type).toBe('image/png');
+    expect(imageContent.size).toBeGreaterThan(0);
+    expect(new Uint8Array(await imageContent.arrayBuffer()).slice(0, 8)).toEqual(
+      new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+    );
+  });
+});
+
 test('uses the configured team My Folders root when the account belongs to multiple teams', async () => {
   let selectedTeam: string | undefined;
   await withMockedWorkDrive((url) => {
@@ -204,6 +254,183 @@ test('lists all files and folders recursively across pages', async () => {
     expect(entries.find((entry) => entry.id === 'last-root-file')?.path).toBe('last.txt');
   });
 });
+
+test('lists all Team Folders across pages', async () => {
+  const requestedOffsets: string[] = [];
+  const firstPage = Array.from({ length: 50 }, (_, index) => ({
+    id: `team-folder-${index}`,
+    attributes: { name: `Team Folder ${index}`, status: index === 0 ? 'Active' : 'Inactive' },
+  }));
+
+  await withMockedWorkDrive((url) => {
+    if (url.includes('/teams/test-team/teamfolders?')) {
+      const requestUrl = new URL(url);
+      const offset = requestUrl.searchParams.get('page[offset]') ?? '';
+      requestedOffsets.push(offset);
+      return new Response(JSON.stringify({
+        data: offset === '0' ? firstPage : [{ id: 'team-folder-last', attributes: { name: 'Last Team', status: 'Active' } }],
+      }), { status: 200 });
+    }
+    return undefined;
+  }, async (tokenPath) => {
+    const api = createApi(tokenPath, 'test-team');
+    const folders = await api.listTeamFolders();
+
+    expect(requestedOffsets).toEqual(['0', '50']);
+    expect(folders).toHaveLength(51);
+    expect(folders[0]).toEqual({ id: 'team-folder-0', name: 'Team Folder 0', status: 'Active' });
+    expect(folders.at(-1)).toEqual({ id: 'team-folder-last', name: 'Last Team', status: 'Active' });
+  });
+});
+
+test('lists Team Folder files and nested folders recursively', async () => {
+  const requests: string[] = [];
+
+  await withMockedWorkDrive((url) => {
+    requests.push(url);
+    if (url.includes('/teamfolders/team-folder-id/files?')) {
+      return new Response(JSON.stringify({
+        data: [
+          { id: 'document-id', attributes: { name: 'document.txt', is_folder: false } },
+          { id: 'nested-folder-id', attributes: { name: 'Nested', is_folder: true } },
+        ],
+      }), { status: 200 });
+    }
+    if (url.includes('/files/nested-folder-id/files?')) {
+      return new Response(JSON.stringify({
+        data: [{ id: 'nested-document-id', attributes: { name: 'inside.txt', is_folder: false } }],
+      }), { status: 200 });
+    }
+    return undefined;
+  }, async (tokenPath) => {
+    const api = createApi(tokenPath, 'test-team');
+    const entries = await api.listTeamFolderFiles('team-folder-id');
+
+    expect(requests.map((url) => new URL(url).pathname)).toEqual([
+      '/workdrive/api/v1/teamfolders/team-folder-id/files',
+      '/workdrive/api/v1/files/nested-folder-id/files',
+    ]);
+    expect(entries.map(({ name, type, path }) => ({ name, type, path }))).toEqual([
+      { name: 'document.txt', type: 'File', path: 'document.txt' },
+      { name: 'Nested', type: 'Folder', path: 'Nested' },
+      { name: 'inside.txt', type: 'File', path: 'Nested\\inside.txt' },
+    ]);
+  });
+});
+
+  test('retries a reset Team Folder listing without duplicating the inventory', async () => {
+    let attempts = 0;
+    await withMockedWorkDrive((url) => {
+      if (url.includes('/teams/test-team/teamfolders?')) {
+        attempts++;
+        if (attempts === 1) {
+          throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+        }
+        return new Response(JSON.stringify({
+          data: [{ id: 'folder', attributes: { name: 'Team', status: 'Active' } }],
+        }));
+      }
+      return undefined;
+    }, async (tokenPath) => {
+      await expect(createApi(tokenPath, 'test-team').listTeamFolders()).resolves.toEqual([
+        { id: 'folder', name: 'Team', status: 'Active' },
+      ]);
+      expect(attempts).toBe(2);
+    });
+  });
+
+  test('reports the endpoint and preserves the cause after repeated connection resets', async () => {
+    let attempts = 0;
+    const failure = new TypeError('fetch failed', {
+      cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+    });
+    await withMockedWorkDrive((url) => {
+      if (url.includes('/teams/test-team/teamfolders?')) {
+        attempts++;
+        throw failure;
+      }
+      return undefined;
+    }, async (tokenPath) => {
+      const request = createApi(tokenPath, 'test-team').listTeamFolders();
+      await expect(request).rejects.toThrow(
+        'GET https://www.zohoapis.in/workdrive/api/v1/teams/test-team/teamfolders failed after 3 attempt(s) (ECONNRESET)',
+      );
+      await expect(request).rejects.toHaveProperty('cause', failure);
+      expect(attempts).toBe(3);
+    });
+  });
+
+  test('does not retry HTTP authorization errors or invalid JSON', async () => {
+    for (const invalidJson of [false, true]) {
+      let attempts = 0;
+      await withMockedWorkDrive((url) => {
+        if (url.includes('/teams/test-team/teamfolders?')) {
+          attempts++;
+          return invalidJson
+            ? new Response('invalid JSON')
+            : new Response(JSON.stringify({ errors: [{ title: 'Unauthorized' }] }), { status: 401 });
+        }
+        return undefined;
+      }, async (tokenPath) => {
+        await expect(createApi(tokenPath, 'test-team').listTeamFolders()).rejects.toThrow(
+          invalidJson ? 'SyntaxError' : 'HTTP 401',
+        );
+        expect(attempts).toBe(1);
+      });
+    }
+  });
+
+  test('retries a connection reset while reading a Team Folder response body', async () => {
+    let attempts = 0;
+    await withMockedWorkDrive((url) => {
+      if (url.includes('/teamfolders/folder/files?')) {
+        attempts++;
+        if (attempts === 1) {
+          return new Response(new ReadableStream({
+            start(controller) {
+              controller.error(new TypeError('terminated', {
+                cause: Object.assign(new Error('socket closed'), { code: 'UND_ERR_SOCKET' }),
+              }));
+            },
+          }));
+        }
+        return new Response(JSON.stringify({ data: [] }));
+      }
+      return undefined;
+    }, async (tokenPath) => {
+      await expect(createApi(tokenPath, 'test-team').listTeamFolderFiles('folder')).resolves.toEqual([]);
+      expect(attempts).toBe(2);
+    });
+  });
+
+  test('retries token refresh connection resets before listing Team Folders', async () => {
+    await withMockedWorkDrive((url) => {
+      if (url.includes('/teams/test-team/teamfolders?')) {
+        return new Response(JSON.stringify({ data: [] }));
+      }
+      return undefined;
+    }, async (tokenPath) => {
+      const mockedFetch = globalThis.fetch;
+      let refreshAttempts = 0;
+      globalThis.fetch = async (input, init) => {
+        if (String(input).endsWith('/oauth/v2/token')) {
+          refreshAttempts++;
+          if (refreshAttempts === 1) {
+            throw new TypeError('fetch failed', {
+              cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+            });
+          }
+        }
+        return mockedFetch(input, init);
+      };
+      try {
+        await expect(createApi(tokenPath, 'test-team').listTeamFolders()).resolves.toEqual([]);
+        expect(refreshAttempts).toBe(2);
+      } finally {
+        globalThis.fetch = mockedFetch;
+      }
+    });
+  });
 
 test('rejects an unavailable configured team instead of choosing a different team', async () => {
   await withMockedWorkDrive((url) => {

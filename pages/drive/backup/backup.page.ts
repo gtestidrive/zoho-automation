@@ -1,7 +1,9 @@
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
 import { backupLabels, backupPatterns } from './backup.labels';
 import { DriveBackupAssertions, type BackupHistoryState, type DriveUser } from './backup.assertions';
 import { DriveBackupLocators } from './backup.locators';
+import { ZohoWorkDriveApi } from '../api/zoho-workdrive.api';
+import { testSettings } from '../../../test-settings';
 
 function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -13,30 +15,31 @@ export type DriveSnapshotEntry = {
   path: string;
 };
 
+export type DriveExportResult = {
+  selectedEntries: DriveSnapshotEntry[];
+  status: 'Active';
+};
+
+type ExportCandidate = DriveSnapshotEntry & { checkbox: Locator };
+type ExportHistoryRow = { text: string; cells: string[] };
+
 export class DriveBackupPage {
   private readonly locators: DriveBackupLocators;
   private readonly assertions: DriveBackupAssertions;
+  private readonly workDriveApi: ZohoWorkDriveApi;
 
   constructor(private readonly page: Page) {
     this.locators = new DriveBackupLocators(page);
     this.assertions = new DriveBackupAssertions(this.locators);
+    this.workDriveApi = new ZohoWorkDriveApi(testSettings.zohoWorkDrive);
   }
 
-  async selectFirstUser(): Promise<DriveUser> {
-    const firstUserRow = this.locators.userRows().nth(1);
-    await expect(firstUserRow).toContainText(backupPatterns.email, { timeout: 30_000 });
-
-    const cells = await this.locators.rowCells(firstUserRow).allInnerTexts();
-    const name = cells[0]?.trim() ?? '';
-    const email = cells[1]?.trim() ?? '';
-
-    if (!name || !email) {
-      throw new Error('The first Drive user row must contain a name and email address.');
-    }
-
-    await firstUserRow.click();
-    await expect(this.locators.backupNowButton).toBeVisible();
-    return { name, email };
+  async createNativeFolder(): Promise<string> {
+    const runStamp = new Date().toISOString().replace(/[-:T.Z]/g, '');
+    const folderName = `test-${runStamp}`;
+    await this.workDriveApi.createFolder(folderName);
+    log(`[Zoho WorkDrive] Created folder "${folderName}".`);
+    return folderName;
   }
 
   async getBackupHistoryState(user: DriveUser): Promise<BackupHistoryState> {
@@ -70,30 +73,18 @@ export class DriveBackupPage {
 
   async getSnapshotEntries(): Promise<DriveSnapshotEntry[]> {
     const entries: DriveSnapshotEntry[] = [];
-    const tabPanel = this.locators.snapshotPanel;
     const table = this.locators.snapshotTable;
     const range = this.locators.snapshotRange;
 
     const visitFolder = async (parentPath: string[]): Promise<void> => {
-      const foldersToVisit: Array<{ name: string; path: string[]; pageIndex: number; rowIndex: number }> = [];
-      let pageIndex = 0;
-      let pageSize = 0;
+      const foldersToVisit: Array<{ name: string; path: string[] }> = [];
+      const folderNames = new Set<string>();
 
       for (;;) {
         await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
         await expect(range).toBeVisible();
 
         const currentRange = await range.innerText();
-        const rangeMatch = currentRange.match(/(\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)/);
-        if (!rangeMatch) {
-          throw new Error(`Could not read C2C snapshot pagination range: "${currentRange}".`);
-        }
-        const firstItemIndex = Number(rangeMatch[1]);
-        const lastItemIndex = Number(rangeMatch[2]);
-        if (pageIndex === 0) {
-          pageSize = lastItemIndex - firstItemIndex + 1;
-        }
-
         const rows = this.locators.tableRows(table);
         const rowCount = await rows.count();
         for (let index = 1; index < rowCount; index++) {
@@ -110,11 +101,15 @@ export class DriveBackupPage {
           const path = [...parentPath, name];
           entries.push({ name, type, path: path.join('\\') });
           if (type === backupLabels.folderType) {
-            foldersToVisit.push({ name, path, pageIndex, rowIndex: index });
+            if (folderNames.has(name)) {
+              throw new Error(`C2C snapshot contains multiple folders named "${name}" under "${parentPath.join('\\') || 'My Folder'}"; cannot distinguish their paths.`);
+            }
+            folderNames.add(name);
+            foldersToVisit.push({ name, path });
           }
         }
 
-        log(`[Zoho backup] Scanned snapshot page ${pageIndex + 1} (${currentRange}) under ${parentPath.join('\\') || 'My Folder'}.`);
+        log(`[Zoho backup] Scanned snapshot page ${currentRange} under ${parentPath.join('\\') || 'My Folder'}.`);
         const nextPage = this.locators.snapshotNextPageButton;
         if (await nextPage.isDisabled()) {
           break;
@@ -122,24 +117,45 @@ export class DriveBackupPage {
 
         await nextPage.click();
         await expect(range).not.toHaveText(currentRange);
-        pageIndex++;
       }
 
       for (const folder of foldersToVisit) {
-        while (pageIndex !== folder.pageIndex) {
+        while (!(await this.locators.snapshotPreviousPageButton.isDisabled())) {
           const currentRange = await range.innerText();
-          const direction = pageIndex < folder.pageIndex ? 'next' : 'previous';
-          const pageButton = this.locators.pageButton(tabPanel, direction);
-          if (await pageButton.isDisabled()) {
-            throw new Error(`Could not navigate to snapshot page ${folder.pageIndex + 1} to inspect "${folder.path.join('\\')}".`);
-          }
-          await pageButton.click();
+          await this.locators.snapshotPreviousPageButton.click();
           await expect(range).not.toHaveText(currentRange);
-          pageIndex += direction === 'next' ? 1 : -1;
+        }
+
+        let folderRow: Locator | undefined;
+        for (;;) {
+          await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
+          await expect(range).toBeVisible();
+
+          const rows = this.locators.tableRows(table);
+          const rowCount = await rows.count();
+          for (let index = 1; index < rowCount; index++) {
+            const row = rows.nth(index);
+            const cells = await this.locators.rowCells(row).allInnerTexts();
+            if (cells[1]?.trim() === folder.name && cells[2]?.trim() === backupLabels.folderType) {
+              folderRow = row;
+              break;
+            }
+          }
+
+          if (folderRow || await this.locators.snapshotNextPageButton.isDisabled()) {
+            break;
+          }
+
+          const currentRange = await range.innerText();
+          await this.locators.snapshotNextPageButton.click();
+          await expect(range).not.toHaveText(currentRange);
+        }
+
+        if (!folderRow) {
+          throw new Error(`Could not find snapshot folder "${folder.path.join('\\')}" while reopening its parent.`);
         }
 
         log(`[Zoho backup] Opening snapshot folder "${folder.path.join('\\')}".`);
-        const folderRow = this.locators.rowAt(table, folder.rowIndex);
         await this.locators.cellAt(folderRow, 1).click();
         await expect(this.locators.snapshotBreadcrumb(folder.name).last()).toBeVisible();
         await visitFolder(folder.path);
@@ -147,13 +163,6 @@ export class DriveBackupPage {
         const parentCrumb = parentPath.at(-1) ?? backupLabels.myFolderBreadcrumb;
         await this.locators.snapshotBreadcrumbButton(parentCrumb).last().click();
         await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 60_000 });
-
-        const parentRange = await range.innerText();
-        const parentRangeMatch = parentRange.match(/(\d+)\s*[–-]\s*(\d+)\s+of\s+(\d+)/);
-        if (!parentRangeMatch || pageSize === 0) {
-          throw new Error(`Could not determine the current C2C snapshot page after returning from "${folder.path.join('\\')}".`);
-        }
-        pageIndex = Math.floor((Number(parentRangeMatch[1]) - 1) / pageSize);
       }
     };
 
@@ -183,82 +192,152 @@ export class DriveBackupPage {
     await this.assertions.expectSnapshotEntryPresent(expectedEntry);
   }
 
-  async getDisplayedStorageBytes(): Promise<number> {
-    await expect(this.locators.storageValue).toBeVisible();
-    return this.parseSizeBytes(await this.locators.storageValue.innerText());
+  async expectSnapshotMatchesNativeDrive(userEmail: string): Promise<void> {
+    const sourceEntries = await this.workDriveApi.listFilesAndFolders();
+    await this.openUsersTab();
+    const user = await this.selectUser(userEmail);
+    const snapshotEntries = await this.getSnapshotEntries();
+    this.assertions.expectSnapshotMatchesSource(sourceEntries, snapshotEntries);
+    log(`[Zoho Backup Suite] Drive comparison completed for ${user.email}.`);
   }
 
-  async sumLatestSnapshotFileSizes(): Promise<number> {
-    return this.sumCurrentFolderFileSizes([]);
-  }
+  async exportRandomSnapshotEntriesAndWait(userEmail: string): Promise<DriveExportResult> {
+    await this.openUsersTab();
+    const user = await this.selectUser(userEmail);
 
-  private async sumCurrentFolderFileSizes(folderPath: string[]): Promise<number> {
-    const tabPanel = this.locators.snapshotPanel;
-    const table = this.locators.snapshotTable;
-    const range = this.locators.snapshotRange;
-    const fileSizes: number[] = [];
-    const folders: string[] = [];
+    await this.openExportsTab();
+    const previousRows = await this.readExportHistoryRows();
+    await this.openUsersTab();
+    await this.selectUser(user.email);
 
-    for (;;) {
-      await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
-      await expect(range).toBeVisible();
-      const rows = this.locators.tableRows(table);
-      const rowCount = await rows.count();
+    const candidates = await this.getVisibleExportCandidates();
+    const selectedEntries = chooseRandomDriveExportEntries(candidates);
+    for (const entry of selectedEntries) {
+      await entry.checkbox.check();
+    }
 
-      for (let index = 1; index < rowCount; index++) {
-        const cells = await this.locators.rowCells(rows.nth(index)).allInnerTexts();
-        const name = cells[1]?.trim() ?? '';
-        const type = cells[2]?.trim() ?? '';
-        const size = cells[3]?.trim() ?? '';
+    await expect(this.locators.snapshotExportButton).toBeEnabled();
+    log(`[Zoho C2C Drive] Preparing export for ${selectedEntries.map(({ path }) => path).join(', ')}.`);
+    await this.locators.snapshotExportButton.click();
+    await expect(this.locators.exportDialog).toBeVisible({ timeout: 15_000 });
+    await expect(this.locators.selectedItemsRadio).toBeChecked();
+    const exportStartedAt = Date.now();
+    await this.locators.confirmExportButton.click();
+    await expect(this.locators.exportDialog).toBeHidden({ timeout: 30_000 });
+    log(`[Zoho C2C Drive] Submitted export for ${selectedEntries.map(({ path }) => path).join(', ')}.`);
 
-        if (!name || name === backupLabels.emptyFolderMessage) {
-          continue;
-        }
-
-        if (type === backupLabels.folderType) {
-          folders.push(name);
-        } else if (size) {
-          fileSizes.push(this.parseSizeBytes(size));
-        } else {
-          throw new Error(`Could not read the size of snapshot file "${name}".`);
-        }
+    await this.openExportsTab();
+    let latestStatus: string | undefined;
+    await expect.poll(async () => {
+      await this.refreshExportsTab();
+      const currentRows = await this.readExportHistoryRows();
+      const previousText = new Set(previousRows.map(({ text }) => text));
+      const newRow = currentRows.find(({ text }) => !previousText.has(text));
+      if (!newRow) {
+        return '';
       }
 
-      const currentRange = await range.innerText();
-      const nextPage = this.locators.snapshotNextPageButton;
-      if (await nextPage.isDisabled()) {
-        break;
+      const status = newRow.cells.find((cell) => /\b(?:active|failed)\b/i.test(cell))?.trim();
+      if (status && /^failed\b/i.test(status)) {
+        throw new Error(
+          `Drive export failed for ${user.email} after selecting ${selectedEntries.map(({ path }) => path).join(', ')}. Row: ${newRow.text}`,
+        );
+      }
+      latestStatus = status;
+      return status ?? '';
+    }, {
+      timeout: 10 * 60_000,
+      intervals: [2_000, 5_000],
+      message: `Waiting for the Drive export for ${user.email} to become Active.`,
+    }).toMatch(/^active$/i);
+
+    const elapsedSeconds = ((Date.now() - exportStartedAt) / 1000).toFixed(1);
+    log(`[Zoho C2C Drive] Export for ${user.email} reached ${latestStatus} in ${elapsedSeconds}s.`);
+    return { selectedEntries, status: 'Active' };
+  }
+
+  private async openExportsTab(): Promise<void> {
+    await expect(this.locators.exportsTab).toBeVisible({ timeout: 30_000 });
+    await this.locators.exportsTab.click();
+    await expect(this.locators.exportsTab).toHaveAttribute('aria-selected', 'true');
+    await expect(this.locators.exportsTable).toBeVisible({ timeout: 30_000 });
+  }
+
+  private async refreshExportsTab(): Promise<void> {
+    await this.page.reload({ waitUntil: 'domcontentloaded' });
+    await this.openExportsTab();
+  }
+
+  private async readExportHistoryRows(): Promise<ExportHistoryRow[]> {
+    await expect(this.locators.exportsTab).toHaveAttribute('aria-selected', 'true');
+    await expect(this.locators.exportsTable).toBeVisible({ timeout: 30_000 });
+    await expect(this.locators.exportsLoading).toBeHidden({ timeout: 60_000 });
+    const rows = this.locators.exportRows();
+    const result: ExportHistoryRow[] = [];
+    for (let index = 1; index < await rows.count(); index++) {
+      const row = rows.nth(index);
+      const cells = (await this.locators.rowCells(row).allInnerTexts()).map((cell) => cell.trim());
+      result.push({ text: cells.join(' | '), cells });
+    }
+    return result;
+  }
+
+  private async getVisibleExportCandidates(): Promise<ExportCandidate[]> {
+    await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.snapshotRange).toBeVisible({ timeout: 30_000 });
+    const rows = this.locators.tableRows(this.locators.snapshotTable);
+    const candidates: ExportCandidate[] = [];
+
+    for (let index = 1; index < await rows.count(); index++) {
+      const row = rows.nth(index);
+      const cells = await this.locators.rowCells(row).allInnerTexts();
+      const name = cells[1]?.trim() ?? '';
+      const type = cells[2]?.trim();
+      if (!name || (type !== backupLabels.folderType && type !== backupLabels.fileType)) {
+        continue;
       }
 
-      await nextPage.click();
-      await expect(range).not.toHaveText(currentRange);
+      const checkbox = row.getByRole('checkbox');
+      if (await checkbox.count() !== 1 || !(await checkbox.isEnabled())) {
+        continue;
+      }
+      candidates.push({
+        name,
+        type,
+        path: name,
+        checkbox,
+      });
     }
-
-    // Traverse nested folders recursively to compare the displayed storage total with snapshot contents.
-    let totalBytes = fileSizes.reduce((total, size) => total + size, 0);
-    for (const folder of folders) {
-      const folderCell = this.locators.snapshotFolderCell(folder);
-      await folderCell.click();
-      await expect(this.locators.snapshotBreadcrumb(folder)).toBeVisible();
-      totalBytes += await this.sumCurrentFolderFileSizes([...folderPath, folder]);
-
-      const parentCrumb = folderPath.at(-1) ?? backupLabels.myFolderBreadcrumb;
-      await this.locators.snapshotBreadcrumbButton(parentCrumb).click();
-      await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
+    if (candidates.length === 0) {
+      throw new Error('The selected Drive snapshot page has no selectable files or folders to export.');
     }
-
-    return totalBytes;
+    return candidates;
   }
 
-  private parseSizeBytes(sizeText: string): number {
-    const match = sizeText.trim().match(/^([\d,.]+)\s*(B|KB|MB|GB|TB)$/i);
-    if (!match) {
-      throw new Error(`Unrecognized file size value: "${sizeText}".`);
+}
+
+export function chooseRandomDriveExportEntries<T extends Pick<DriveSnapshotEntry, 'type'>>(
+  entries: T[],
+  random: () => number = Math.random,
+): T[] {
+  const remaining = [...entries];
+  const selected: T[] = [];
+  const pickOne = (type: DriveSnapshotEntry['type']): void => {
+    const matching = remaining.filter((entry) => entry.type === type);
+    if (matching.length === 0) {
+      return;
     }
+    const index = Math.floor(random() * matching.length);
+    const [entry] = matching.splice(index, 1);
+    selected.push(entry);
+    remaining.splice(remaining.indexOf(entry), 1);
+  };
 
-    const value = Number(match[1].replace(/,/g, ''));
-    const unitIndex = ['B', 'KB', 'MB', 'GB', 'TB'].indexOf(match[2].toUpperCase());
-    return value * 1024 ** unitIndex;
+  pickOne('File');
+  pickOne('Folder');
+  while (selected.length < 3 && remaining.length > 0) {
+    const index = Math.floor(random() * remaining.length);
+    selected.push(remaining.splice(index, 1)[0]);
   }
-
+  return selected;
 }

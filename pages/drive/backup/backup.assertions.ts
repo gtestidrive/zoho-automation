@@ -1,6 +1,26 @@
 import { expect, type Locator } from '@playwright/test';
 import { backupPatterns } from './backup.labels';
 import { DriveBackupLocators } from './backup.locators';
+import type { WorkDriveEntry } from '../api/zoho-workdrive.api';
+
+export type DriveInventoryEntry = Pick<WorkDriveEntry, 'path' | 'type'>;
+
+function driveEntryKey(entry: DriveInventoryEntry): string {
+  const path = entry.path.replace(/\//g, '\\').replace(/ {2,}/g, ' ').toLowerCase();
+  return `${entry.type.toLowerCase()}:${path}`;
+}
+
+export function compareWorkDriveEntries<TSource extends DriveInventoryEntry, TSnapshot extends DriveInventoryEntry>(
+  source: TSource[],
+  snapshot: TSnapshot[],
+): { missingFromC2C: TSource[]; extraInC2C: TSnapshot[] } {
+  const snapshotKeys = new Set(snapshot.map(driveEntryKey));
+  const sourceKeys = new Set(source.map(driveEntryKey));
+  return {
+    missingFromC2C: source.filter((entry) => !snapshotKeys.has(driveEntryKey(entry))),
+    extraInC2C: snapshot.filter((entry) => !sourceKeys.has(driveEntryKey(entry))),
+  };
+}
 
 function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -19,6 +39,25 @@ export type DriveUser = {
 
 export class DriveBackupAssertions {
   constructor(private readonly locators: DriveBackupLocators) {}
+
+  expectSnapshotMatchesSource(source: WorkDriveEntry[], snapshot: DriveInventoryEntry[]): void {
+    const differences = compareWorkDriveEntries(source, snapshot);
+    console.table([{
+      Product: 'Drive',
+      SourceEntries: source.length,
+      SnapshotEntries: snapshot.length,
+      MissingFromSnapshot: differences.missingFromC2C.length,
+      ExtraInSnapshot: differences.extraInC2C.length,
+    }]);
+    for (const entry of differences.missingFromC2C) {
+      log(`[Zoho Backup Suite] Drive: missing from C2C: ${entry.type} ${entry.path}`);
+    }
+    for (const entry of differences.extraInC2C) {
+      log(`[Zoho Backup Suite] Drive: extra in C2C: ${entry.type} ${entry.path}`);
+    }
+    expect(differences.missingFromC2C, 'Drive items are missing from the C2C snapshot.').toEqual([]);
+    expect(differences.extraInC2C, 'The C2C Drive snapshot contains unexpected items.').toEqual([]);
+  }
 
   async readBackupHistoryState(user: DriveUser): Promise<BackupHistoryState> {
     await this.locators.backupsTab.click();
@@ -86,15 +125,6 @@ export class DriveBackupAssertions {
     }
 
     throw new Error(`Drive backup snapshot does not contain the expected entry "${entryName}".`);
-  }
-
-  async expectStorageMatchesSnapshot(storageBytes: number, snapshotBytes: number): Promise<void> {
-    const roundingTolerance = Math.max(0.1 * 1024 ** 3, storageBytes * 0.01);
-    const difference = Math.abs(storageBytes - snapshotBytes);
-    expect(
-      difference,
-      `Drive storage (${this.formatSize(storageBytes)}) should match latest snapshot file total (${this.formatSize(snapshotBytes)}).`,
-    ).toBeLessThanOrEqual(roundingTolerance);
   }
 
   async expectLatestBackupCompleted(user: DriveUser, previousState: BackupHistoryState): Promise<void> {
@@ -176,9 +206,5 @@ export class DriveBackupAssertions {
     await this.locators.historySearchButton.click();
     await expect(this.locators.pageLoading(tabPanel)).toBeHidden({ timeout: 30_000 });
     await expect(this.locators.pageRange(tabPanel)).toBeVisible();
-  }
-
-  private formatSize(bytes: number): string {
-    return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   }
 }
