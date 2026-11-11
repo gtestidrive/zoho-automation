@@ -16,19 +16,9 @@ export function zohoMailChecksum(folders: ZohoMailFolder[]): string {
 }
 
 export class MailBackupAssertions {
-  async expectMessageToAppear(
-    foldersProvider: () => Promise<ZohoMailFolder[]>,
-    subject: string,
-  ): Promise<void> {
-    await expect.poll(async () => {
-      const folders = await foldersProvider();
-      return folders.some((folder) =>
-        folder.messages.some((message) => message.subject === subject));
-    }, {
-      timeout: 2 * 60_000,
-      intervals: [5_000],
-      message: `Waiting for the sent test message "${subject}" to appear in native Zoho Mail.`,
-    }).toBe(true);
+  expectMessagePresent(folders: ZohoMailFolder[], subject: string): void {
+    expect(folders.some((folder) => folder.messages.some((message) => message.subject === subject)),
+      `The sent test message "${subject}" must appear in native Zoho Mail.`).toBe(true);
   }
 
   expectSnapshotMatchesSource(

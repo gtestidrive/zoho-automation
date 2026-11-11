@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
 import { ZohoMailApi } from '../../../pages/mail/api/zoho-mail.api';
+import { OAuthPage } from '../../../pages/oauth.page';
 import { testSettings } from '../../../test-settings';
 
 test('authorize Zoho Mail read and send access', async ({ page }) => {
@@ -9,5 +10,5 @@ test('authorize Zoho Mail read and send access', async ({ page }) => {
   );
   test.setTimeout(16 * 60_000);
 
-  await new ZohoMailApi(testSettings.zohoMail).authorize(page);
+  await new ZohoMailApi(testSettings.zohoMail).authorize(new OAuthPage(page).open);
 });

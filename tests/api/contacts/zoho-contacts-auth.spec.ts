@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
 import { ZohoContactsApi } from '../../../pages/contacts/api/zoho-contacts.api';
+import { OAuthPage } from '../../../pages/oauth.page';
 import { testSettings } from '../../../test-settings';
 
 test('authorize Zoho Contacts read and create access', async ({ page }) => {
@@ -9,5 +10,5 @@ test('authorize Zoho Contacts read and create access', async ({ page }) => {
   );
   test.setTimeout(16 * 60_000);
 
-  await new ZohoContactsApi(testSettings.zohoContacts).authorize(page);
+  await new ZohoContactsApi(testSettings.zohoContacts).authorize(new OAuthPage(page).open);
 });

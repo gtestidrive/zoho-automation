@@ -1,6 +1,5 @@
 import { expect, type Page } from '@playwright/test';
 import { ContactsBackupPage, type ContactsRestoreUser } from '../backup/contacts-backup.page';
-import { contactsBackupLabels } from '../backup/contacts-backup.labels';
 import { ContactsRestoreLocators } from './contacts-restore.locators';
 
 export type ContactsRestoreResult = {
@@ -41,20 +40,20 @@ export class ContactsRestorePage extends ContactsBackupPage {
   async startC2cNewFolderRestore(user: ContactsRestoreUser): Promise<string> {
     await this.selectUser(user.email);
     const dialog = this.restoreLocators.dialog;
-    await this.page.getByRole('button', { name: contactsBackupLabels.restoreDialog, exact: true }).click();
+    await this.restoreLocators.restoreButton(this.page).click();
     await expect(dialog).toBeVisible();
-    await dialog.getByRole('radio', { name: 'Snapshot', exact: true }).check();
-    await dialog.getByRole('radio', { name: /New folder/ }).check();
-    await expect(dialog.getByRole('radio', { name: /New folder/ })).toBeChecked();
-    await dialog.getByRole('combobox', { name: contactsBackupLabels.restoreTo }).selectOption({ label: user.name });
+    await this.restoreLocators.snapshotRadio(dialog).check();
+    await this.restoreLocators.newFolderRadio(dialog).check();
+    await expect(this.restoreLocators.newFolderRadio(dialog)).toBeChecked();
+    await this.restoreLocators.destination(dialog).selectOption({ label: user.name });
 
     const startedAt = new Date().toISOString();
     log(`[Zoho C2C Contacts] Restoring the latest snapshot for ${user.email} to a new folder.`);
-    await dialog.getByRole('button', { name: contactsBackupLabels.restoreDialog, exact: true }).click();
-    const confirmation = this.page.getByRole('dialog').filter({ hasText: /confirm.*restore|are you sure/i });
+    await this.restoreLocators.submitRestore(dialog).click();
+    const confirmation = this.restoreLocators.confirmation(this.page);
     await expect.poll(async () => {
       if (await confirmation.isVisible()) {
-        await confirmation.getByRole('button', { name: /^(confirm restore|confirm|restore)$/i }).click();
+        await this.restoreLocators.confirmRestore(confirmation).click();
       }
       return !(await dialog.isVisible());
     }, { timeout: 30_000 }).toBe(true);
@@ -64,11 +63,11 @@ export class ContactsRestorePage extends ContactsBackupPage {
 
   private async readRestoreHistory(): Promise<{ rows: string[]; totalCount: number }> {
     await this.restoreLocators.restoresTab.click();
-    await expect(this.restoreLocators.restoresPanel.getByRole('table')).toBeVisible();
-    await expect(this.restoreLocators.restoresPanel.getByText(contactsBackupLabels.loading, { exact: true }))
+    await expect(this.restoreLocators.historyTable()).toBeVisible();
+    await expect(this.restoreLocators.historyLoading())
       .toBeHidden({ timeout: 30_000 });
     const rows = this.restoreLocators.tableRows(this.restoreLocators.restoresTable);
-    const range = this.restoreLocators.restoresPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/);
+    const range = this.restoreLocators.historyRange();
     const countMatch = (await range.innerText()).match(/of\s+(\d+)/);
     if (!countMatch) {
       throw new Error('Could not read the Contacts restore history result count.');
@@ -81,9 +80,9 @@ export class ContactsRestorePage extends ContactsBackupPage {
     previousHistory: { rows: string[]; totalCount: number },
   ): Promise<ContactsRestoreResult | undefined> {
     await this.restoreLocators.restoresTab.click();
-    await expect(this.restoreLocators.restoresPanel.getByText(contactsBackupLabels.loading, { exact: true }))
+    await expect(this.restoreLocators.historyLoading())
       .toBeHidden({ timeout: 30_000 });
-    const range = this.restoreLocators.restoresPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/);
+    const range = this.restoreLocators.historyRange();
     const countMatch = (await range.innerText()).match(/of\s+(\d+)/);
     if (!countMatch) {
       throw new Error('Could not read the Contacts restore history result count.');
@@ -91,7 +90,7 @@ export class ContactsRestorePage extends ContactsBackupPage {
     const totalCount = Number(countMatch[1]);
     const rows = this.restoreLocators.tableRows(this.restoreLocators.restoresTable);
     for (let index = 1; index < await rows.count(); index++) {
-      const row = rows.nth(index);
+      const row = this.restoreLocators.rowAt(rows, index);
       const rowText = (await row.innerText()).trim();
       const newFirstRow = index === 1 && totalCount > previousHistory.totalCount;
       if (previousHistory.rows.includes(rowText) && !newFirstRow) {

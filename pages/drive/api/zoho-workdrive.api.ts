@@ -1,9 +1,8 @@
-import { createServer, type Server } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
+import { dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { Page } from '@playwright/test';
 
 type WorkDriveSettings = {
   clientId: string;
@@ -93,10 +92,10 @@ export class ZohoWorkDriveApi {
   private accessToken: string | undefined;
   private resolvedParentFolderId: string | undefined;
 
-  constructor(private readonly settings: WorkDriveSettings) {}
+  constructor(private readonly settings: WorkDriveSettings) { }
 
   // One-time interactive consent: capture the local callback code, exchange it, and save credentials.
-  async authorize(page: Page): Promise<void> {
+  async authorize(openAuthorizationPage: (url: string) => Promise<void>): Promise<void> {
     this.validateClientSettings(this.settings.clientId, this.settings.clientSecret);
 
     const redirectUrl = new URL(this.settings.redirectUri);
@@ -169,7 +168,7 @@ export class ZohoWorkDriveApi {
       authorizeUrl.search = new URLSearchParams(authorizationParameters).toString();
 
       console.log('[Zoho OAuth] Opening Zoho consent. Sign in and approve the requested WorkDrive file-creation access.');
-      await page.goto(authorizeUrl.toString(), { waitUntil: 'domcontentloaded' });
+      await openAuthorizationPage(authorizeUrl.toString());
 
       const timeout = setTimeout(() => {
         rejectCode(new Error('Zoho OAuth authorization timed out after 15 minutes.'));
@@ -305,14 +304,29 @@ export class ZohoWorkDriveApi {
     return resourceId;
   }
 
-  // List all descendants of the selected team's My Folders root, including nested folder contents.
-  async listFilesAndFolders(): Promise<WorkDriveEntry[]> {
+  // Backups read the whole root; exports can restrict recursion to selected root items.
+  async listFilesAndFolders(selectedRootNames?: readonly string[]): Promise<WorkDriveEntry[]> {
+    if (selectedRootNames && (selectedRootNames.length === 0
+      || selectedRootNames.some((name) => !name.trim())
+      || new Set(selectedRootNames.map((name) => name.toLowerCase())).size !== selectedRootNames.length)) {
+      throw new Error('Selected WorkDrive root names must be nonempty and unique.');
+    }
     const rootFolderId = await this.getParentFolderId();
     const entries: WorkDriveEntry[] = [];
     const visitedFolderIds = new Set([rootFolderId]);
 
     const visitFolder = async (folderId: string, parentPath: string): Promise<void> => {
-      const items = await this.listFolderContents(folderId);
+      let items = await this.listFolderContents(folderId);
+      if (parentPath === '' && selectedRootNames) {
+        items = selectedRootNames.map((name) => {
+          const matches = items.filter((item) => isRecord(item.attributes)
+            && firstString(item.attributes, ['name'])?.toLowerCase() === name.toLowerCase());
+          if (matches.length !== 1) {
+            throw new Error(`Cannot uniquely identify selected WorkDrive root item "${name}" (matches=${matches.length}).`);
+          }
+          return matches[0];
+        });
+      }
       for (const item of items) {
         const attributes = item.attributes;
         if (!isRecord(attributes)) {
@@ -340,6 +354,22 @@ export class ZohoWorkDriveApi {
 
     await visitFolder(rootFolderId, '');
     return entries;
+  }
+
+  async downloadFile(fileId: string): Promise<Uint8Array> {
+    const { body } = await this.request(
+      new URL(`${this.settings.apiUrl}/download/${encodeURIComponent(fileId)}`),
+      { headers: { Authorization: `Zoho-oauthtoken ${await this.getAccessToken()}` } },
+      true,
+      async (response) => {
+        if (!response.ok) {
+          throw new Error(`Zoho WorkDrive file download failed for ${fileId} (HTTP ${response.status}).`);
+        }
+        return new Uint8Array(await response.arrayBuffer());
+      },
+      120_000,
+    );
+    return body;
   }
 
   async listTeamFolders(): Promise<WorkDriveTeamFolder[]> {
@@ -442,8 +472,7 @@ export class ZohoWorkDriveApi {
       url.searchParams.set('page[limit]', String(workDrivePageSize));
       url.searchParams.set('page[offset]', String(offset));
 
-      const response = await fetch(url, { headers });
-      const body: unknown = await response.json();
+      const { response, body } = await this.requestJson(url, { headers }, true);
       if (!response.ok) {
         throw new Error(
           `Zoho WorkDrive folder listing failed (HTTP ${response.status}): ${responseError(body)}`,
@@ -675,12 +704,22 @@ export class ZohoWorkDriveApi {
     init: RequestInit,
     retryTransportErrors: boolean,
   ): Promise<{ response: Response; body: unknown }> {
+    return this.request(url, init, retryTransportErrors, (response): Promise<unknown> => response.json());
+  }
+
+  private async request<T>(
+    url: URL,
+    init: RequestInit,
+    retryTransportErrors: boolean,
+    readBody: (response: Response) => Promise<T>,
+    timeoutMs = 30_000,
+  ): Promise<{ response: Response; body: T }> {
     const attempts = retryTransportErrors ? 3 : 1;
     const operation = `${init.method ?? 'GET'} ${url.origin}${url.pathname}`;
     for (let attempt = 1; ; attempt++) {
       try {
-        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
-        const body: unknown = await response.json();
+        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        const body = await readBody(response);
         return { response, body };
       } catch (error) {
         const cause = isRecord(error) && isRecord(error.cause) ? error.cause : error;

@@ -1,8 +1,7 @@
-import { createServer, type Server } from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
-import type { Page } from '@playwright/test';
 
 type ZohoContactsSettings = {
   clientId: string;
@@ -30,31 +29,7 @@ export type ZohoContactCategory = {
 export type ZohoContactFolder = ZohoContactCategory & { contacts: ZohoContact[] };
 
 const contactsPageSize = 100;
-const contactContentFields = [
-  'first_name', 'middle_name', 'last_name', 'gender', 'notes',
-  'birth_day', 'birth_month', 'birth_year', 'company', 'job_title', 'designation',
-  'emails', 'phones', 'address', 'urls', 'ims',
-];
 
-function normalizeContent(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(normalizeContent).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
-  }
-  if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort()
-      .filter((key) => !['id', 'contact_id', 'category_id'].includes(key))
-      .map((key) => [key, normalizeContent(value[key])])
-      .filter(([, item]) => item !== undefined && item !== null && item !== ''));
-  }
-  return value;
-}
-
-export function zohoContactsChecksum(contacts: ZohoContact[]): string {
-  const records = contacts.map((contact) => JSON.stringify(normalizeContent(
-    Object.fromEntries(contactContentFields.map((key) => [key, contact[key]])),
-  ))).sort();
-  return createHash('sha256').update(JSON.stringify(records)).digest('hex');
-}
 
 export function zohoContactSummary(contact: ZohoContact): { name: string; email: string; phone: string } {
   const nestedText = (value: unknown, key: string): string => {
@@ -70,17 +45,6 @@ export function zohoContactSummary(contact: ZohoContact): { name: string; email:
     email: nestedText(contact.emails, 'email_id'),
     phone: nestedText(contact.phones, 'number'),
   };
-}
-
-export function isCurrentContactsRestoreFolder(name: string, startedAt: number, completedAt: number): boolean {
-  const match = /^Restored Contacts (\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(name);
-  if (!match) {
-    return false;
-  }
-  const timestamp = Date.parse(`${match[1]}T${match[2]}:00Z`);
-  return Number.isFinite(timestamp)
-    && timestamp >= Math.floor(startedAt / 60_000) * 60_000
-    && timestamp <= completedAt;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -163,9 +127,9 @@ function describeError(body: unknown): string {
 export class ZohoContactsApi {
   private accessToken: string | undefined;
 
-  constructor(private readonly settings: ZohoContactsSettings) {}
+  constructor(private readonly settings: ZohoContactsSettings) { }
 
-  async authorize(page: Page): Promise<void> {
+  async authorize(openAuthorizationPage: (url: string) => Promise<void>): Promise<void> {
     if (!this.settings.clientId || !this.settings.clientSecret) {
       throw new Error('Set ZOHO_CONTACTS_CLIENT_ID and ZOHO_CONTACTS_CLIENT_SECRET before setting up Zoho Contacts OAuth.');
     }
@@ -229,7 +193,7 @@ export class ZohoContactsApi {
         state,
       }).toString();
       console.log('[Zoho Contacts OAuth] Sign in and approve Contacts read and create access in the browser.');
-      await page.goto(authorizeUrl.toString(), { waitUntil: 'domcontentloaded' });
+      await openAuthorizationPage(authorizeUrl.toString());
 
       const timeout = setTimeout(() => {
         rejectCode(new Error('Zoho Contacts OAuth authorization timed out after 15 minutes.'));
@@ -279,8 +243,8 @@ export class ZohoContactsApi {
     return this.listRecords('contacts');
   }
 
-  async expectAccountEmail(email: string): Promise<void> {
-    const accounts = [];
+  async readAccountIds(email: string): Promise<{ authorized: string; selected: string }> {
+    const accounts: string[] = [];
     for (const account of ['self', encodeURIComponent(email)]) {
       const url = new URL(`accounts/${account}/contacts`, `${this.settings.apiUrl.replace(/\/+$/, '')}/`);
       url.searchParams.set('fields', 'count');
@@ -291,9 +255,7 @@ export class ZohoContactsApi {
       }
       accounts.push(body.contacts.account_id);
     }
-    if (accounts[0] !== accounts[1]) {
-      throw new Error(`Zoho Contacts OAuth account does not match the C2C user ${email}. Reauthorize with the correct account.`);
-    }
+    return { authorized: accounts[0], selected: accounts[1] };
   }
 
   async listCategories(): Promise<ZohoContactCategory[]> {
@@ -362,7 +324,7 @@ export class ZohoContactsApi {
     const contacts: ZohoContact[] = [];
     let page = 1;
 
-    for (;;) {
+    for (; ;) {
       const pageUrl = new URL(url);
       pageUrl.searchParams.set('per_page', String(contactsPageSize));
       pageUrl.searchParams.set('page', String(page));

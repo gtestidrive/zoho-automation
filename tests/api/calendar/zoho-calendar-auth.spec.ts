@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
 import { ZohoCalendarApi } from '../../../pages/calendar/api/zoho-calendar.api';
+import { OAuthPage } from '../../../pages/oauth.page';
 import { testSettings } from '../../../test-settings';
 
 test('authorize Zoho Calendar read and event creation access', async ({ page }) => {
@@ -9,5 +10,5 @@ test('authorize Zoho Calendar read and event creation access', async ({ page }) 
   );
   test.setTimeout(16 * 60_000);
 
-  await new ZohoCalendarApi(testSettings.zohoCalendar).authorize(page, testSettings.zohoNative.email);
+  await new ZohoCalendarApi(testSettings.zohoCalendar).authorize(new OAuthPage(page).open, testSettings.zohoNative.email);
 });

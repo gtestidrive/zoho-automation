@@ -5,3 +5,8 @@ blob-report/
 .env
 .auth/
 test-settings.local.ts
+# Playwright generated test results
+test-results/
+test-results-*/
+playwright-report/
+playwright-report-*/

@@ -8,9 +8,6 @@ export const mailBackupLabels = {
   backupNow: 'Backup now',
   searchUsers: 'Search Users',
   loading: 'Loading...',
-  export: /^export$/i,
-  selectedItems: /^selected items/i,
-  exportsTab: /^exports?$/i,
 } as const;
 
 export const mailBackupPatterns = {

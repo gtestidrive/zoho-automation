@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
-import { RecoveryPage, recoveryTabs } from '../pages/recovery.page';
+import { recoveryTabs } from '../pages/recovery.labels';
+import { RecoveryPage } from '../pages/recovery.page';
 import { SignInPage } from '../pages/sign-in.page';
 import { testSettings } from '../test-settings';
 

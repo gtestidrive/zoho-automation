@@ -1,13 +1,12 @@
 import { expect, test } from '@playwright/test';
-import { setupContacts } from '../pages/contacts/contacts_restore_config';
 import {
-  isCurrentContactsRestoreFolder,
   type ZohoContactCategory,
-  zohoContactSummary,
   ZohoContactsApi,
-  zohoContactsChecksum,
+  zohoContactSummary,
 } from '../pages/contacts/api/zoho-contacts.api';
-import { contactSummariesChecksum } from '../pages/contacts/backup/contacts-backup.assertions';
+import { ContactsBackupAssertions, contactSummariesChecksum } from '../pages/contacts/backup/contacts-backup.assertions';
+import { isCurrentContactsRestoreFolder, zohoContactsChecksum } from '../pages/contacts/restore/contacts-restore.assertions';
+import { setupContacts } from '../pages/contacts/restore/contacts_restore_config';
 import { testSettings } from '../test-settings';
 
 test('backs up Zoho Contacts and verifies a new timestamped restore folder', { tag: '@zoho' }, async ({ page }) => {
@@ -24,7 +23,7 @@ test('backs up Zoho Contacts and verifies a new timestamped restore folder', { t
 
   const api = new ZohoContactsApi(testSettings.zohoContacts);
   const sourceContacts = await test.step('Capture native Zoho Contacts before backup', async () => {
-    await api.expectAccountEmail(nativeEmail);
+    new ContactsBackupAssertions().expectAccountEmail(nativeEmail, await api.readAccountIds(nativeEmail));
     const contacts = await api.listContacts();
     if (contacts.length === 0) {
       throw new Error('Zoho Contacts is empty. Add contacts to the authorized account before running backup/restore verification.');
@@ -109,7 +108,7 @@ test('restores the existing C2C Contacts snapshot to a new Zoho folder', { tag: 
     'Sign in and open Contacts recovery',
     () => setupContacts(page),
   );
-  await api.expectAccountEmail(email);
+  new ContactsBackupAssertions().expectAccountEmail(email, await api.readAccountIds(email));
 
   const user = await c2c.selectUser(email);
   const snapshot = await test.step('Read the existing C2C snapshot contacts', () =>

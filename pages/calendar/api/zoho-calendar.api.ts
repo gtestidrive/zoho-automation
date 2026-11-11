@@ -1,8 +1,7 @@
-import { createServer, type Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
-import type { Page } from '@playwright/test';
 
 export type ZohoCalendarSettings = {
   clientId: string;
@@ -180,9 +179,9 @@ function apiDate(value: Date): string {
 export class ZohoCalendarApi {
   private accessToken: string | undefined;
 
-  constructor(private readonly settings: ZohoCalendarSettings) {}
+  constructor(private readonly settings: ZohoCalendarSettings) { }
 
-  async authorize(page: Page, loginHint: string): Promise<void> {
+  async authorize(openAuthorizationPage: (url: string) => Promise<void>, loginHint: string): Promise<void> {
     if (!this.settings.clientId || !this.settings.clientSecret) {
       throw new Error('Set ZOHO_CALENDAR_CLIENT_ID and ZOHO_CALENDAR_CLIENT_SECRET before setting up Calendar OAuth.');
     }
@@ -244,7 +243,7 @@ export class ZohoCalendarApi {
         ...(loginHint ? { login_hint: loginHint } : {}),
       }).toString();
       log('[Zoho Calendar OAuth] Approve calendar and event read/create access in the browser.');
-      await page.goto(authorizeUrl.toString(), { waitUntil: 'domcontentloaded' });
+      await openAuthorizationPage(authorizeUrl.toString());
 
       const timeout = setTimeout(() => rejectCode(new Error('Zoho Calendar OAuth authorization timed out after 15 minutes.')), 15 * 60_000);
       let code: string;
@@ -368,7 +367,22 @@ export class ZohoCalendarApi {
     return { calendars, events };
   }
 
-  private async listCalendars(): Promise<ZohoCalendar[]> {
+  async getEventDetails(calendarUid: string, eventUid: string, recurrenceId?: string): Promise<Record<string, unknown>> {
+    const url = new URL(
+      `calendars/${encodeURIComponent(calendarUid)}/events/${encodeURIComponent(eventUid).replace(/%40/g, '@')}`,
+      `${this.settings.apiUrl.replace(/\/+$/, '')}/`,
+    );
+    if (recurrenceId) {
+      url.searchParams.set('recurrenceid', recurrenceId);
+    }
+    const events = recordsFrom(await this.getJson(url), 'events');
+    if (events.length !== 1 || stringValue(events[0], ['uid']) !== eventUid) {
+      throw new Error(`Zoho Calendar did not return exactly the requested event UID=${eventUid}, calendar=${calendarUid}.`);
+    }
+    return events[0];
+  }
+
+  async listCalendars(): Promise<ZohoCalendar[]> {
     const url = new URL('/api/v1/calendars', this.settings.apiUrl);
     url.searchParams.set('category', 'all');
     url.searchParams.set('showhiddencal', 'true');

@@ -1,7 +1,6 @@
 export const contactsBackupLabels = {
   usersTab: 'Users',
   backupsTab: 'Backups',
-  restoresTab: 'Restores',
   backupNow: 'Backup now',
   notifications: 'Notifications',
   loading: 'Loading...',
@@ -9,8 +8,6 @@ export const contactsBackupLabels = {
   search: 'Search',
   nextPage: 'Next page',
   snapshotDateSelector: '.rcv-stat-item--snapshot .ds-datepicker__value',
-  restoreDialog: 'Restore',
-  restoreTo: 'Restore to',
   activityLogs: 'Activity Logs',
   allEventLogs: 'All Event Logs',
   eventLogsTable: 'All event logs',

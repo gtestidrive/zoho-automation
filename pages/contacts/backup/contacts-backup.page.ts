@@ -1,8 +1,6 @@
 import { expect, type Page } from '@playwright/test';
-import type { ZohoContact } from '../api/zoho-contacts.api';
-import { ContactsBackupAssertions } from './contacts-backup.assertions';
+import { contactsBackupPatterns } from './contacts-backup.labels';
 import { ContactsBackupLocators } from './contacts-backup.locators';
-import { contactsBackupLabels, contactsBackupPatterns } from './contacts-backup.labels';
 
 export type ContactsBackupState = {
   timestamp: string;
@@ -23,26 +21,18 @@ function log(message: string): void {
 
 export class ContactsBackupPage {
   private readonly locators: ContactsBackupLocators;
-  private readonly assertions = new ContactsBackupAssertions();
 
   constructor(protected readonly page: Page) {
     this.locators = new ContactsBackupLocators(page);
   }
 
-  expectSnapshotMatchesNativeContacts(
-    sourceContacts: ZohoContact[],
-    snapshotContacts: C2cSnapshotContact[],
-  ): void {
-    this.assertions.expectSnapshotMatchesNativeContacts(sourceContacts, snapshotContacts);
-  }
-
   async selectUser(email: string): Promise<ContactsRestoreUser> {
     await this.locators.usersTab.click();
     const rows = this.locators.tableRows(this.locators.usersTable);
-    await expect(rows.nth(1)).toContainText(contactsBackupPatterns.email, { timeout: 30_000 });
+    await expect(this.locators.firstUserRow(rows)).toContainText(contactsBackupPatterns.email, { timeout: 30_000 });
 
     for (let index = 1; index < await rows.count(); index++) {
-      const row = rows.nth(index);
+      const row = this.locators.rowAt(rows, index);
       const cells = await this.locators.rowCells(row).allInnerTexts();
       if (cells[1]?.trim() === email) {
         const user = { name: cells[0]?.trim() ?? '', email };
@@ -101,30 +91,24 @@ export class ContactsBackupPage {
       throw new Error(`Could not match Contacts backup timestamp "${backup.timestamp}" to Activity Logs.`);
     }
     const eventTimestamp = `${match[2]}/${match[1]}/${match[3]}, ${match[4]}`;
-    const row = this.locators.eventLogsTable.getByRole('row')
-      .filter({ has: this.page.getByRole('cell', { name: user.email, exact: true }) })
-      .filter({ has: this.page.getByRole('cell', { name: 'Contacts', exact: true }) })
-      .filter({ has: this.page.getByRole('cell', { name: 'Backup', exact: true }) })
-      .filter({ has: this.page.getByRole('cell', { name: /^Failed$/i }) })
-      .filter({ hasText: new RegExp(eventTimestamp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') });
+    const row = this.locators.failedBackupEvent(this.page, user.email, eventTimestamp);
     await expect(row, 'The failed Contacts job must appear in Activity Logs.').toHaveCount(1);
-    await row.getByRole('link', { name: contactsBackupLabels.details, exact: true }).click();
+    await this.locators.eventDetails(row).click();
     await expect(this.locators.jobDetailsDialog).toBeVisible();
     console.error(`[Zoho C2C Contacts] ${await this.locators.jobDetailsDialog.innerText()}`);
   }
 
   async readLatestSnapshotContactCount(user: ContactsRestoreUser): Promise<number> {
     await this.selectUser(user.email);
-    await expect(this.locators.usersPanel.getByText(contactsBackupLabels.loading, { exact: true }))
+    await expect(this.locators.snapshotLoading())
       .toBeHidden({ timeout: 30_000 });
-    const lastBackup = this.locators.usersPanel.locator('.rcv-stat-item')
-      .filter({ has: this.page.getByText('Last Backup', { exact: true }) });
+    const lastBackup = this.locators.lastBackupCard(this.page);
     const date = (await lastBackup.innerText()).replace(/^Last Backup\s*/, '').trim();
     if (!date) {
       throw new Error('Contacts snapshot has no last-backup timestamp.');
     }
     await expect(this.locators.snapshotDate, 'The selected snapshot must be the latest backup.').toHaveText(date);
-    const range = this.locators.usersPanel.getByText(contactsBackupPatterns.pagination);
+    const range = this.locators.snapshotRange();
     const match = (await range.innerText()).match(/of\s+(\d+)/);
     if (!match) {
       throw new Error('Could not read the Contacts snapshot contact count.');
@@ -136,8 +120,8 @@ export class ContactsBackupPage {
     const expectedCount = await this.readLatestSnapshotContactCount(user);
     const panel = this.locators.usersPanel;
     const contacts: C2cSnapshotContact[] = [];
-    const table = panel.getByRole('table');
-    const headers = (await table.getByRole('columnheader').allInnerTexts()).map((header) => header.trim());
+    const table = this.locators.snapshotTable(panel);
+    const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((header) => header.trim());
     const columns = ['Name', 'Email', 'Phone'].map((name) => {
       const index = headers.indexOf(name);
       if (index < 0 || headers.lastIndexOf(name) !== index) {
@@ -145,11 +129,11 @@ export class ContactsBackupPage {
       }
       return index;
     });
-    for (;;) {
-      await expect(panel.getByText(contactsBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
-      const rows = table.getByRole('row');
+    for (; ;) {
+      await expect(this.locators.panelLoading(panel)).toBeHidden({ timeout: 30_000 });
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+        const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
         if (cells.length !== headers.length) {
           throw new Error(`C2C Contacts snapshot row has ${cells.length} cells for ${headers.length} columns.`);
         }
@@ -159,11 +143,11 @@ export class ContactsBackupPage {
           phone: cells[columns[2]].trim(),
         });
       }
-      const next = panel.getByRole('button', { name: contactsBackupLabels.nextPage, exact: true });
+      const next = this.locators.snapshotNext(panel);
       if (await next.isDisabled()) {
         break;
       }
-      const range = panel.getByText(contactsBackupPatterns.pagination);
+      const range = this.locators.panelRange(panel);
       const previousRange = await range.innerText();
       await next.click();
       await expect(range).not.toHaveText(previousRange);
@@ -177,23 +161,23 @@ export class ContactsBackupPage {
   private async readLatestBackup(user: ContactsRestoreUser): Promise<ContactsBackupState | undefined> {
     await this.locators.backupsTab.click();
     const panel = this.locators.backupsPanel;
-    const selector = panel.getByRole('button', { name: contactsBackupLabels.selectUser, exact: true });
-    const selectedUser = panel.getByRole('button', { name: user.name, exact: true });
+    const selector = this.locators.historyUserSelector(panel);
+    const selectedUser = this.locators.historyUser(panel, user.name);
     if (!(await selectedUser.isVisible())) {
       await selector.click();
-      await this.page.getByRole('option', { name: user.name, exact: true }).click();
+      await this.locators.userOption(this.page, user.name).click();
     }
 
-    await panel.getByRole('button', { name: contactsBackupLabels.search, exact: true }).click();
-    await expect(panel.getByText(contactsBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
+    await this.locators.historySearch(panel).click();
+    await expect(this.locators.panelLoading(panel)).toBeHidden({ timeout: 30_000 });
     const rows = this.locators.tableRows(this.locators.backupsTable);
-    const range = panel.getByText(contactsBackupPatterns.pagination);
+    const range = this.locators.panelRange(panel);
     const countMatch = (await range.innerText()).match(/of\s+(\d+)/);
     if (!countMatch) {
       throw new Error('Could not read the Contacts backup history result count.');
     }
     for (let index = 1; index < await rows.count(); index++) {
-      const cells = await this.locators.rowCells(rows.nth(index)).allInnerTexts();
+      const cells = await this.locators.rowCells(this.locators.rowAt(rows, index)).allInnerTexts();
       if (cells[1]?.trim() === user.email) {
         return {
           timestamp: cells[0]?.trim() ?? '',

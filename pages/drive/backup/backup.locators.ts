@@ -19,13 +19,6 @@ export class DriveBackupLocators {
   readonly snapshotNavigation: Locator;
   readonly snapshotNextPageButton: Locator;
   readonly snapshotPreviousPageButton: Locator;
-  readonly snapshotExportButton: Locator;
-  readonly exportDialog: Locator;
-  readonly selectedItemsRadio: Locator;
-  readonly confirmExportButton: Locator;
-  readonly exportsTab: Locator;
-  readonly exportsTable: Locator;
-  readonly exportsLoading: Locator;
 
   constructor(private readonly page: Page) {
     this.main = page.getByRole('main', { name: backupLabels.main });
@@ -45,13 +38,6 @@ export class DriveBackupLocators {
     this.snapshotNavigation = this.snapshotPanel.getByRole('navigation');
     this.snapshotNextPageButton = this.snapshotPanel.getByRole('button', { name: backupLabels.nextPageButton });
     this.snapshotPreviousPageButton = this.snapshotPanel.getByRole('button', { name: backupLabels.previousPageButton });
-    this.snapshotExportButton = this.main.getByRole('button', { name: /^export$/i });
-    this.exportDialog = this.page.getByRole('dialog', { name: /^export$/i });
-    this.selectedItemsRadio = this.exportDialog.getByRole('radio', { name: /^selected items/i });
-    this.confirmExportButton = this.exportDialog.getByRole('button', { name: /^export$/i });
-    this.exportsTab = this.main.getByRole('tab', { name: /^exports?$/i });
-    this.exportsTable = this.main.getByRole('table').last();
-    this.exportsLoading = this.exportsTable.getByText(backupLabels.loading, { exact: true });
   }
 
   userRows(): Locator {
@@ -72,10 +58,6 @@ export class DriveBackupLocators {
 
   historyRows(): Locator {
     return this.historyTable.getByRole('row');
-  }
-
-  exportRows(): Locator {
-    return this.exportsTable.getByRole('row');
   }
 
   userSelector(panel: Locator, name: string): Locator {
@@ -106,4 +88,20 @@ export class DriveBackupLocators {
     return this.snapshotNavigation.last().getByRole('button', { name, exact: true });
   }
 
+
+  firstUserRow(): Locator {
+    return this.userRows().nth(1);
+  }
+
+  rowAt(rows: Locator, index: number): Locator {
+    return rows.nth(index);
+  }
+
+  currentFolderBreadcrumb(name: string): Locator {
+    return this.snapshotBreadcrumb(name).last();
+  }
+
+  parentFolderBreadcrumb(parentCrumb: string): Locator {
+    return this.snapshotBreadcrumbButton(parentCrumb).last();
+  }
 }

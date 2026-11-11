@@ -1,13 +1,13 @@
 import { expect, type Locator, type Page } from '@playwright/test';
+import { testSettings } from '../../../test-settings';
 import {
   type ZohoCalendarApi,
   type ZohoCalendarEvent,
   type ZohoCalendarTestEvent,
 } from '../api/zoho-calendar.api';
-import { testSettings } from '../../../test-settings';
-import { CalendarBackupAssertions } from './calendar-backup.assertions';
+import { CalendarBackupAssertions, calendarComparisonRange } from './calendar-backup.assertions';
+import { calendarBackupPatterns } from './calendar-backup.labels';
 import { CalendarBackupLocators } from './calendar-backup.locators';
-import { calendarBackupLabels, calendarBackupPatterns } from './calendar-backup.labels';
 
 export type CalendarBackupUser = {
   name: string;
@@ -43,9 +43,6 @@ export class CalendarBackupPage {
   private readonly locators: CalendarBackupLocators;
   private readonly usersTab: Locator;
   private readonly backupsTab: Locator;
-  private readonly usersPanel: Locator;
-  private readonly backupsPanel: Locator;
-  private readonly usersTable: Locator;
   private readonly backupNowButton: Locator;
   private readonly notifications: Locator;
 
@@ -53,9 +50,6 @@ export class CalendarBackupPage {
     this.locators = new CalendarBackupLocators(page);
     this.usersTab = this.locators.usersTab;
     this.backupsTab = this.locators.backupsTab;
-    this.usersPanel = this.locators.usersPanel;
-    this.backupsPanel = this.locators.backupsPanel;
-    this.usersTable = this.locators.usersTable;
     this.backupNowButton = this.locators.backupNowButton;
     this.notifications = this.locators.notifications;
   }
@@ -64,39 +58,39 @@ export class CalendarBackupPage {
     return calendarApi.createTestEvent(testSettings.zohoCalendar.testAttendeeEmail);
   }
 
-  async expectSnapshotMatchesNativeCalendar(
+  async compareSnapshotWithNativeCalendar(
     calendarApi: ZohoCalendarApi,
     snapshot: CalendarSnapshot,
     testEvent: ZohoCalendarTestEvent,
   ): Promise<void> {
-    await this.assertions.expectSnapshotMatchesNativeCalendar(
-      calendarApi,
-      snapshot,
-      testEvent,
+    const range = calendarComparisonRange(
+      [...snapshot.events.map((event) => event.start), testEvent.start],
       testSettings.zohoCalendar.rangeStart,
       testSettings.zohoCalendar.rangeEnd,
     );
+    const inventory = await calendarApi.listCalendarInventory(range.start, range.end);
+    this.assertions.expectSnapshotMatchesNativeCalendar(inventory, snapshot, testEvent);
   }
 
   async selectUser(email: string): Promise<CalendarBackupUser> {
     const normalizedEmail = email.trim();
     await this.usersTab.click();
-    const allUsers = this.usersPanel.getByRole('button', { name: calendarBackupLabels.allUsers });
+    const allUsers = this.locators.allUsers();
     if (await allUsers.isVisible()) {
       await allUsers.click();
     }
-    const search = this.usersPanel.getByRole('searchbox', { name: calendarBackupLabels.searchUsers });
+    const search = this.locators.userSearch();
     await search.fill(normalizedEmail);
-    await expect(this.usersPanel.getByText(calendarBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
 
-    const row = this.usersTable.getByRole('row').nth(1);
-    const cells = row.getByRole('cell');
-    await expect(cells.nth(1)).toHaveText(normalizedEmail, { timeout: 30_000 });
-    const name = (await cells.nth(0).innerText()).trim();
+    const row = this.locators.firstUserRow();
+    const cells = this.locators.rowCells(row);
+    await expect(this.locators.userEmailCell(cells)).toHaveText(normalizedEmail, { timeout: 30_000 });
+    const name = (await this.locators.userNameCell(cells).innerText()).trim();
     if (!name) {
       throw new Error(`Calendar user ${normalizedEmail} has no display name.`);
     }
-    await row.getByText(name, { exact: true }).click();
+    await this.locators.userName(row, name).click();
     await expect(this.backupNowButton).toBeVisible({ timeout: 30_000 });
     return { name, email: normalizedEmail };
   }
@@ -140,10 +134,10 @@ export class CalendarBackupPage {
       if (!row) {
         throw new Error(`Could not find C2C Calendar folder "${folder.name}" (occurrence ${folder.occurrence + 1}).`);
       }
-      const table = this.usersPanel.getByRole('table').last();
+      const table = this.locators.snapshotTable();
       const nameColumn = await this.columnIndexFromTable(table, 'Name');
       const previousContents = await table.innerText();
-      await row.getByRole('cell').nth(nameColumn).click();
+      await this.locators.rowCell(row, nameColumn).click();
       await expect.poll(async () => await table.innerText()).not.toBe(previousContents);
       log(`[Zoho C2C Calendar] Opened "${folder.name}"${folder.occurrence ? ` (${folder.occurrence + 1})` : ''}.`);
 
@@ -161,22 +155,22 @@ export class CalendarBackupPage {
   }
 
   private async listCalendarFolders(): Promise<C2CCalendarFolder[]> {
-    const table = this.usersPanel.getByRole('table').last();
-    const range = this.usersPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/).last();
+    const table = this.locators.snapshotTable();
+    const range = this.locators.snapshotRange();
     const folders: C2CCalendarFolder[] = [];
     const occurrences = new Map<string, number>();
 
-    for (;;) {
+    for (; ;) {
       await expect(table).toBeVisible();
       await expect(range).toBeVisible();
-      await expect(this.usersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-      const headers = (await table.getByRole('columnheader').allInnerTexts()).map((value) => value.trim());
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+      const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((value) => value.trim());
       const nameColumn = this.columnIndex(headers, 'Name');
       const organizerColumn = this.columnIndex(headers, 'Organizer');
       const startColumn = this.columnIndex(headers, 'Start');
-      const rows = table.getByRole('row');
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+        const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
         if (cells.length !== headers.length) {
           throw new Error(`C2C Calendar folder row has ${cells.length} cells for ${headers.length} columns.`);
         }
@@ -193,7 +187,7 @@ export class CalendarBackupPage {
         folders.push({ name, organizer, start, occurrence });
       }
 
-      const next = this.usersPanel.getByRole('button', { name: 'Next page', exact: true });
+      const next = this.locators.snapshotNext();
       if (await next.isDisabled()) {
         break;
       }
@@ -205,20 +199,20 @@ export class CalendarBackupPage {
   }
 
   private async readCurrentFolderEvents(calendarName: string): Promise<CalendarSnapshotEvent[]> {
-    const table = this.usersPanel.getByRole('table').last();
-    const range = this.usersPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/).last();
+    const table = this.locators.snapshotTable();
+    const range = this.locators.snapshotRange();
     const events: CalendarSnapshotEvent[] = [];
-    for (;;) {
+    for (; ;) {
       await expect(table).toBeVisible();
       await expect(range).toBeVisible();
-      await expect(this.usersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-      const headers = (await table.getByRole('columnheader').allInnerTexts()).map((value) => value.trim());
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+      const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((value) => value.trim());
       const nameColumn = this.columnIndex(headers, 'Name');
       const organizerColumn = this.columnIndex(headers, 'Organizer');
       const startColumn = this.columnIndex(headers, 'Start');
-      const rows = table.getByRole('row');
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+        const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
         if (cells.some((cell) => /no events found/i.test(cell.trim()))) {
           continue;
         }
@@ -238,7 +232,7 @@ export class CalendarBackupPage {
         }
         events.push({ calendarName, title, organizer: cells[organizerColumn]?.trim() ?? '', start });
       }
-      const next = this.usersPanel.getByRole('button', { name: 'Next page', exact: true });
+      const next = this.locators.snapshotNext();
       if (await next.isDisabled()) {
         break;
       }
@@ -250,21 +244,21 @@ export class CalendarBackupPage {
   }
 
   private async findCalendarFolderRow(folder: C2CCalendarFolder): Promise<Locator | undefined> {
-    const table = this.usersPanel.getByRole('table').last();
-    const range = this.usersPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/).last();
+    const table = this.locators.snapshotTable();
+    const range = this.locators.snapshotRange();
     const signature = JSON.stringify([folder.name.toLowerCase(), folder.organizer.toLowerCase(), folder.start]);
     let occurrence = 0;
-    for (;;) {
+    for (; ;) {
       await expect(range).toBeVisible();
-      await expect(this.usersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-      const headers = (await table.getByRole('columnheader').allInnerTexts()).map((value) => value.trim());
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+      const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((value) => value.trim());
       const nameColumn = this.columnIndex(headers, 'Name');
       const organizerColumn = this.columnIndex(headers, 'Organizer');
       const startColumn = this.columnIndex(headers, 'Start');
-      const rows = table.getByRole('row');
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const row = rows.nth(index);
-        const cells = await row.getByRole('cell').allInnerTexts();
+        const row = this.locators.rowAt(rows, index);
+        const cells = await this.locators.rowCells(row).allInnerTexts();
         const rowSignature = JSON.stringify([
           cells[nameColumn]?.trim().toLowerCase() ?? '',
           cells[organizerColumn]?.trim().toLowerCase() ?? '',
@@ -277,7 +271,7 @@ export class CalendarBackupPage {
           occurrence += 1;
         }
       }
-      const next = this.usersPanel.getByRole('button', { name: 'Next page', exact: true });
+      const next = this.locators.snapshotNext();
       if (await next.isDisabled()) {
         return undefined;
       }
@@ -288,55 +282,55 @@ export class CalendarBackupPage {
   }
 
   private async returnToFirstCalendarPage(): Promise<void> {
-    const range = this.usersPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/).last();
-    const previous = this.usersPanel.getByRole('button', { name: 'Previous page', exact: true });
+    const range = this.locators.snapshotRange();
+    const previous = this.locators.snapshotPrevious();
     while (!(await previous.isDisabled())) {
       const currentRange = await range.innerText();
       await previous.click();
       await expect(range).not.toHaveText(currentRange);
-      await expect(this.usersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
     }
   }
 
   private async returnToCalendarList(folderName: string): Promise<void> {
-    const backButton = this.usersPanel.getByRole('button', { name: /^(?:←\s*)?calendars$/i });
+    const backButton = this.locators.calendarsBack();
     if (await backButton.isVisible()) {
       await backButton.click();
     } else {
-      const breadcrumbs = this.usersPanel.getByRole('navigation').last();
-      const parentButton = breadcrumbs.getByRole('button', { name: folderName, exact: true });
+      const breadcrumbs = this.locators.breadcrumbs();
+      const parentButton = this.locators.breadcrumbButton(breadcrumbs, folderName);
       if (!(await parentButton.isVisible())) {
         throw new Error(`Could not return from C2C Calendar folder "${folderName}" to its calendar list.`);
       }
       await parentButton.click();
     }
-    await expect(this.usersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-    await expect(this.usersPanel.getByRole('table').last()).toBeVisible();
+    await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.snapshotTable()).toBeVisible();
   }
 
   private async columnIndexFromTable(table: Locator, name: string): Promise<number> {
-    const headers = (await table.getByRole('columnheader').allInnerTexts()).map((value) => value.trim());
+    const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((value) => value.trim());
     return this.columnIndex(headers, name);
   }
 
   private async readLatestBackup(user: CalendarBackupUser): Promise<CalendarBackupState> {
     await this.backupsTab.click();
-    const selectedUser = this.backupsPanel.getByRole('button', { name: user.name, exact: true });
+    const selectedUser = this.locators.historyUser(user.name);
     if (!(await selectedUser.isVisible())) {
-      await this.backupsPanel.getByRole('button', { name: 'Select User', exact: true }).click();
-      await this.page.getByRole('option', { name: user.name, exact: true }).click();
+      await this.locators.historyUserSelector().click();
+      await this.locators.userOption(this.page, user.name).click();
     }
-    await this.backupsPanel.getByRole('button', { name: 'Search', exact: true }).click();
-    await expect(this.backupsPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
+    await this.locators.historySearch().click();
+    await expect(this.locators.historyLoading()).toBeHidden({ timeout: 30_000 });
 
-    const rows = this.backupsPanel.getByRole('table').first().getByRole('row');
-    const range = this.backupsPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/);
+    const rows = this.locators.historyRows();
+    const range = this.locators.historyRange();
     const total = Number((await range.innerText()).match(/of\s+(\d+)/)?.[1]);
     if (!Number.isSafeInteger(total)) {
       throw new Error('Could not read the Calendar backup history row count.');
     }
     for (let index = 1; index < await rows.count(); index++) {
-      const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+      const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
       if (cells[1]?.trim().toLowerCase() === user.email.toLowerCase()) {
         return { timestamp: cells[0]?.trim() ?? '', status: cells[2]?.trim() ?? '', totalCount: total };
       }

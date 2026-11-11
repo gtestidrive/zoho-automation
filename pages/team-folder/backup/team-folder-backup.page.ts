@@ -9,8 +9,8 @@ import {
   TeamFolderBackupAssertions,
   teamFolderKey,
 } from './team-folder-backup.assertions';
+import { teamFolderBackupPatterns } from './team-folder-backup.labels';
 import { TeamFolderBackupLocators } from './team-folder-backup.locators';
-import { teamFolderBackupLabels, teamFolderBackupPatterns } from './team-folder-backup.labels';
 
 export type C2CTeamFolder = {
   name: string;
@@ -40,48 +40,42 @@ export class TeamFolderBackupPage {
   private readonly assertions = new TeamFolderBackupAssertions();
   private readonly locators: TeamFolderBackupLocators;
 
-  private readonly main: Locator;
   private readonly teamFoldersTab: Locator;
   private readonly backupsTab: Locator;
-  private readonly teamFoldersPanel: Locator;
-  private readonly backupsPanel: Locator;
   private readonly notifications: Locator;
 
   constructor(private readonly page: Page) {
     this.locators = new TeamFolderBackupLocators(page);
-    this.main = this.locators.main;
     this.teamFoldersTab = this.locators.teamFoldersTab;
     this.backupsTab = this.locators.backupsTab;
-    this.teamFoldersPanel = this.locators.teamFoldersPanel;
-    this.backupsPanel = this.locators.backupsPanel;
     this.notifications = this.locators.notifications;
   }
 
   async listTeamFolders(): Promise<C2CTeamFolder[]> {
     await this.teamFoldersTab.click();
-    const allTeams = this.teamFoldersPanel.getByRole('button', { name: /All Team Folders/ });
+    const allTeams = this.locators.allTeams();
     if (await allTeams.isVisible()) {
       await allTeams.click();
     }
-    const search = this.teamFoldersPanel.getByRole('searchbox', { name: teamFolderBackupLabels.searchTeamFolders });
+    const search = this.locators.teamSearch();
     await search.fill('');
-    await expect(this.teamFoldersPanel.getByText(teamFolderBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.teamLoading()).toBeHidden({ timeout: 30_000 });
 
-    const table = this.teamFoldersPanel.getByRole('table').first();
-    const headers = (await table.getByRole('columnheader').allInnerTexts()).map((value) => value.trim().toLowerCase());
+    const table = this.locators.teamsTable();
+    const headers = (await this.locators.columnHeaders(table).allInnerTexts()).map((value) => value.trim().toLowerCase());
     const nameColumn = this.columnIndex(headers, 'folder name');
     const ownerColumn = this.columnIndex(headers, 'owner');
     const lastBackupColumn = this.columnIndex(headers, 'last backup');
     const storageColumn = this.columnIndex(headers, 'storage used');
-    const range = this.teamFoldersPanel.getByText(teamFolderBackupPatterns.pagination).last();
+    const range = this.locators.teamsRange();
     const teams: C2CTeamFolder[] = [];
 
-    for (;;) {
+    for (; ;) {
       await expect(range).toBeVisible();
-      await expect(this.teamFoldersPanel.getByText(teamFolderBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
-      const rows = table.getByRole('row');
+      await expect(this.locators.teamLoading()).toBeHidden({ timeout: 30_000 });
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+        const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
         const name = cells[nameColumn]?.trim() ?? '';
         if (name) {
           teams.push({
@@ -93,7 +87,7 @@ export class TeamFolderBackupPage {
           });
         }
       }
-      const next = this.teamFoldersPanel.getByRole('button', { name: teamFolderBackupLabels.nextPage, exact: true });
+      const next = this.locators.nextTeamPage();
       if (await next.isDisabled()) {
         break;
       }
@@ -107,25 +101,25 @@ export class TeamFolderBackupPage {
 
   async openTeamFolder(name: string): Promise<C2CTeamFolder> {
     await this.teamFoldersTab.click();
-    const allTeams = this.teamFoldersPanel.getByRole('button', { name: /All Team Folders/ });
+    const allTeams = this.locators.allTeams();
     if (await allTeams.isVisible()) {
       await allTeams.click();
     }
-    const search = this.teamFoldersPanel.getByRole('searchbox', { name: teamFolderBackupLabels.searchTeamFolders });
+    const search = this.locators.teamSearch();
     await search.fill(name);
-    await expect(this.teamFoldersPanel.getByText(teamFolderBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.teamLoading()).toBeHidden({ timeout: 30_000 });
 
-    const row = this.teamFoldersPanel.getByRole('table').first().getByRole('row').nth(1);
-    const cells = row.getByRole('cell');
-    await expect(cells.nth(0)).toHaveText(name, { timeout: 30_000 });
+    const row = this.locators.firstTeamRow();
+    const cells = this.locators.rowCells(row);
+    await expect(this.locators.teamNameCell(cells)).toHaveText(name, { timeout: 30_000 });
     const [owner, lastBackup, storage] = await Promise.all([
-      cells.nth(1).innerText(), cells.nth(3).innerText(), cells.nth(4).innerText(),
+      this.locators.teamOwnerCell(cells).innerText(), this.locators.teamLastBackupCell(cells).innerText(), this.locators.teamStorageCell(cells).innerText(),
     ]);
-    await row.getByText(name, { exact: true }).click();
-    await expect(this.teamFoldersPanel.getByRole('button', { name: /All Team Folders/ })).toBeVisible({ timeout: 30_000 });
-    await expect(this.teamFoldersPanel.getByRole('searchbox', { name: teamFolderBackupLabels.searchFoldersAndFiles })).toBeVisible({ timeout: 30_000 });
-    await expect(this.teamFoldersPanel.getByText(teamFolderBackupLabels.loading, { exact: true })).toBeHidden({ timeout: 30_000 });
-    const statusCard = this.main.locator('.rcv-stat-item__body').filter({ hasText: /^Status/ }).first();
+    await this.locators.teamName(row, name).click();
+    await expect(this.locators.allTeams()).toBeVisible({ timeout: 30_000 });
+    await expect(this.locators.snapshotSearch()).toBeVisible({ timeout: 30_000 });
+    await expect(this.locators.teamLoading()).toBeHidden({ timeout: 30_000 });
+    const statusCard = this.locators.teamStatusCard();
     const status = (await statusCard.innerText()).replace(/^Status\s*/, '').trim();
     return { name, owner: owner.trim(), lastBackup: lastBackup.trim(), storage: storage.trim(), status };
   }
@@ -133,7 +127,7 @@ export class TeamFolderBackupPage {
   async startBackupAndWait(team: C2CTeamFolder): Promise<TeamFolderBackupState> {
     const previous = await this.readLatestBackup(team.name);
     await this.openTeamFolder(team.name);
-    const backupNow = this.teamFoldersPanel.getByRole('button', { name: /Backup now/i });
+    const backupNow = this.locators.backupNow();
     await expect(backupNow).toBeVisible();
     log(`[C2C Team Folders] Starting backup for active team folder "${team.name}".`);
     await backupNow.click();
@@ -163,6 +157,12 @@ export class TeamFolderBackupPage {
     const entries: WorkDriveEntry[] = [];
     await this.visitFolder([], entries);
     log(`[C2C Team Folders] Snapshot for "${teamName}" contains ${entries.length} files and folders.`);
+    return entries;
+  }
+
+  async readCurrentFolder(parentPath: string[]): Promise<WorkDriveEntry[]> {
+    const entries: WorkDriveEntry[] = [];
+    await this.visitFolder(parentPath, entries);
     return entries;
   }
 
@@ -211,22 +211,22 @@ export class TeamFolderBackupPage {
 
   private async readLatestBackup(teamName: string): Promise<TeamFolderBackupState> {
     await this.backupsTab.click();
-    const selectedTeam = this.backupsPanel.getByRole('button', { name: teamName, exact: true });
+    const selectedTeam = this.locators.historyTeam(teamName);
     if (!(await selectedTeam.isVisible())) {
-      await this.backupsPanel.getByRole('button', { name: 'Select User', exact: true }).click();
-      await this.page.getByRole('option', { name: teamName, exact: true }).click();
+      await this.locators.historyTeamSelector().click();
+      await this.locators.teamOption(this.page, teamName).click();
     }
-    await this.backupsPanel.getByRole('button', { name: 'Search', exact: true }).click();
-    await expect(this.backupsPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-    const table = this.backupsPanel.getByRole('table').first();
-    const rows = table.getByRole('row');
-    const range = this.backupsPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/);
+    await this.locators.historySearch().click();
+    await expect(this.locators.historyLoading()).toBeHidden({ timeout: 30_000 });
+    const table = this.locators.historyTable();
+    const rows = this.locators.tableRows(table);
+    const range = this.locators.historyRange();
     const total = Number((await range.innerText()).match(/of\s+(\d+)/)?.[1]);
     if (!Number.isSafeInteger(total)) {
       throw new Error('Could not read the Team Folder backup history row count.');
     }
     for (let index = 1; index < await rows.count(); index++) {
-      const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+      const cells = await this.locators.rowCellsAt(rows, index).allInnerTexts();
       if (cells[1]?.trim() === teamName) {
         return { timestamp: cells[0]?.trim() ?? '', status: cells[2]?.trim() ?? '', totalCount: total };
       }
@@ -235,16 +235,16 @@ export class TeamFolderBackupPage {
   }
 
   private async visitFolder(parentPath: string[], entries: WorkDriveEntry[]): Promise<void> {
-    const table = this.teamFoldersPanel.getByRole('table').last();
-    const range = this.teamFoldersPanel.getByText(/\d+\s*[–-]\s*\d+\s+of\s+\d+/).last();
+    const table = this.locators.snapshotTable();
+    const range = this.locators.snapshotRange();
     const childFolders = new Map<string, string[]>();
-    for (;;) {
+    for (; ;) {
       await expect(table).toBeVisible();
       await expect(range).toBeVisible();
-      await expect(this.teamFoldersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-      const rows = table.getByRole('row');
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const cells = await rows.nth(index).getByRole('cell').allInnerTexts();
+        const cells = await this.locators.rowCellsAt(rows, index).allTextContents();
         if (cells.length === 0) {
           log(`[C2C Team Folders] Ignoring a non-data placeholder row under "${parentPath.join('\\') || 'Root'}".`);
           continue;
@@ -264,7 +264,7 @@ export class TeamFolderBackupPage {
         }
       }
 
-      const next = this.teamFoldersPanel.getByRole('button', { name: 'Next page', exact: true });
+      const next = this.locators.snapshotNext();
       if (await next.isDisabled()) {
         break;
       }
@@ -279,39 +279,39 @@ export class TeamFolderBackupPage {
       if (!folderRow) {
         throw new Error(`Could not reopen C2C Team Folder path "${path.join('\\')}".`);
       }
-      await folderRow.getByRole('cell').nth(1).click();
-      await expect(this.teamFoldersPanel.getByRole('navigation').last().getByText(name, { exact: true })).toBeVisible();
-      await expect(this.teamFoldersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
+      await this.locators.folderNameCell(folderRow).click();
+      await expect(this.locators.snapshotBreadcrumb(name)).toBeVisible();
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
       await this.visitFolder(path, entries);
       const parent = parentPath.at(-1) ?? 'Root';
-      await this.teamFoldersPanel.getByRole('navigation').last().getByRole('button', { name: parent, exact: true }).click();
-      await expect(this.teamFoldersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
+      await this.locators.snapshotParentBreadcrumb(parent).click();
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
     }
   }
 
   private async returnToFirstPage(range: Locator): Promise<void> {
-    const previous = this.teamFoldersPanel.getByRole('button', { name: 'Previous page', exact: true });
+    const previous = this.locators.snapshotPrevious();
     while (!(await previous.isDisabled())) {
       const current = await range.innerText();
       await previous.click();
       await expect(range).not.toHaveText(current);
-      await expect(this.teamFoldersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
     }
   }
 
   private async findFolderRow(table: Locator, name: string, range: Locator): Promise<Locator | undefined> {
-    for (;;) {
+    for (; ;) {
       await expect(range).toBeVisible();
-      await expect(this.teamFoldersPanel.getByText('Loading...', { exact: true })).toBeHidden({ timeout: 30_000 });
-      const rows = table.getByRole('row');
+      await expect(this.locators.snapshotLoading()).toBeHidden({ timeout: 30_000 });
+      const rows = this.locators.tableRows(table);
       for (let index = 1; index < await rows.count(); index++) {
-        const row = rows.nth(index);
-        const cells = await row.getByRole('cell').allInnerTexts();
+        const row = this.locators.rowAt(rows, index);
+        const cells = await this.locators.rowCells(row).allTextContents();
         if (cells[1]?.trim() === name && cells[3]?.trim() === 'Folder') {
           return row;
         }
       }
-      const next = this.teamFoldersPanel.getByRole('button', { name: 'Next page', exact: true });
+      const next = this.locators.snapshotNext();
       if (await next.isDisabled()) {
         return undefined;
       }

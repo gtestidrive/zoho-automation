@@ -1,9 +1,9 @@
 import { expect, type Locator, type Page } from '@playwright/test';
-import { backupLabels, backupPatterns } from './backup.labels';
-import { DriveBackupAssertions, type BackupHistoryState, type DriveUser } from './backup.assertions';
-import { DriveBackupLocators } from './backup.locators';
-import { ZohoWorkDriveApi } from '../api/zoho-workdrive.api';
 import { testSettings } from '../../../test-settings';
+import { ZohoWorkDriveApi } from '../api/zoho-workdrive.api';
+import { DriveBackupAssertions, type BackupHistoryState, type DriveUser } from './backup.assertions';
+import { backupLabels, backupPatterns } from './backup.labels';
+import { DriveBackupLocators } from './backup.locators';
 
 function log(message: string): void {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -15,20 +15,12 @@ export type DriveSnapshotEntry = {
   path: string;
 };
 
-export type DriveExportResult = {
-  selectedEntries: DriveSnapshotEntry[];
-  status: 'Active';
-};
-
-type ExportCandidate = DriveSnapshotEntry & { checkbox: Locator };
-type ExportHistoryRow = { text: string; cells: string[] };
-
 export class DriveBackupPage {
   private readonly locators: DriveBackupLocators;
   private readonly assertions: DriveBackupAssertions;
   private readonly workDriveApi: ZohoWorkDriveApi;
 
-  constructor(private readonly page: Page) {
+  constructor(page: Page) {
     this.locators = new DriveBackupLocators(page);
     this.assertions = new DriveBackupAssertions(this.locators);
     this.workDriveApi = new ZohoWorkDriveApi(testSettings.zohoWorkDrive);
@@ -42,16 +34,12 @@ export class DriveBackupPage {
     return folderName;
   }
 
-  async getBackupHistoryState(user: DriveUser): Promise<BackupHistoryState> {
-    return this.assertions.readBackupHistoryState(user);
-  }
-
   async openUsersTab(): Promise<void> {
     await this.locators.usersTab.click();
   }
 
   async selectUser(email: string): Promise<DriveUser> {
-    await expect(this.locators.userRows().nth(1)).toContainText(backupPatterns.email, {
+    await expect(this.locators.firstUserRow()).toContainText(backupPatterns.email, {
       timeout: 30_000,
     });
 
@@ -59,7 +47,7 @@ export class DriveBackupPage {
     const rowCount = await rows.count();
 
     for (let index = 1; index < rowCount; index++) {
-      const row = rows.nth(index);
+      const row = this.locators.rowAt(rows, index);
       const cells = await this.locators.rowCells(row).allInnerTexts();
       if (cells[1]?.trim() === email) {
         await row.click();
@@ -71,7 +59,7 @@ export class DriveBackupPage {
     throw new Error(`Could not find Drive user ${email} in the users table.`);
   }
 
-  async getSnapshotEntries(): Promise<DriveSnapshotEntry[]> {
+  async getSnapshotEntries(parentPath: string[] = []): Promise<DriveSnapshotEntry[]> {
     const entries: DriveSnapshotEntry[] = [];
     const table = this.locators.snapshotTable;
     const range = this.locators.snapshotRange;
@@ -80,7 +68,7 @@ export class DriveBackupPage {
       const foldersToVisit: Array<{ name: string; path: string[] }> = [];
       const folderNames = new Set<string>();
 
-      for (;;) {
+      for (; ;) {
         await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
         await expect(range).toBeVisible();
 
@@ -88,8 +76,8 @@ export class DriveBackupPage {
         const rows = this.locators.tableRows(table);
         const rowCount = await rows.count();
         for (let index = 1; index < rowCount; index++) {
-          const row = rows.nth(index);
-          const cells = await this.locators.rowCells(row).allInnerTexts();
+          const row = this.locators.rowAt(rows, index);
+          const cells = await this.locators.rowCells(row).allTextContents();
           const name = cells[1]?.trim() ?? '';
           const type = cells[2]?.trim() === backupLabels.folderType
             ? backupLabels.folderType
@@ -127,15 +115,15 @@ export class DriveBackupPage {
         }
 
         let folderRow: Locator | undefined;
-        for (;;) {
+        for (; ;) {
           await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
           await expect(range).toBeVisible();
 
           const rows = this.locators.tableRows(table);
           const rowCount = await rows.count();
           for (let index = 1; index < rowCount; index++) {
-            const row = rows.nth(index);
-            const cells = await this.locators.rowCells(row).allInnerTexts();
+            const row = this.locators.rowAt(rows, index);
+            const cells = await this.locators.rowCells(row).allTextContents();
             if (cells[1]?.trim() === folder.name && cells[2]?.trim() === backupLabels.folderType) {
               folderRow = row;
               break;
@@ -157,16 +145,16 @@ export class DriveBackupPage {
 
         log(`[Zoho backup] Opening snapshot folder "${folder.path.join('\\')}".`);
         await this.locators.cellAt(folderRow, 1).click();
-        await expect(this.locators.snapshotBreadcrumb(folder.name).last()).toBeVisible();
+        await expect(this.locators.currentFolderBreadcrumb(folder.name)).toBeVisible();
         await visitFolder(folder.path);
 
         const parentCrumb = parentPath.at(-1) ?? backupLabels.myFolderBreadcrumb;
-        await this.locators.snapshotBreadcrumbButton(parentCrumb).last().click();
+        await this.locators.parentFolderBreadcrumb(parentCrumb).click();
         await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 60_000 });
       }
     };
 
-    await visitFolder([]);
+    await visitFolder(parentPath);
     return entries;
   }
 
@@ -185,14 +173,14 @@ export class DriveBackupPage {
     log(`[Zoho C2C] Starting backup for native account ${user.email}.`);
     await this.startBackup();
     await this.assertions.expectBackupStartedNotification();
-    await this.assertions.expectLatestBackupCompleted(user, previousBackupState);
+    await this.waitForLatestBackupCompleted(user, previousBackupState);
 
     await this.openUsersTab();
     await this.selectUser(user.email);
-    await this.assertions.expectSnapshotEntryPresent(expectedEntry);
+    this.assertions.expectSnapshotEntryPresent(expectedEntry, await this.findSnapshotEntry(expectedEntry));
   }
 
-  async expectSnapshotMatchesNativeDrive(userEmail: string): Promise<void> {
+  async compareSnapshotWithNativeDrive(userEmail: string): Promise<void> {
     const sourceEntries = await this.workDriveApi.listFilesAndFolders();
     await this.openUsersTab();
     const user = await this.selectUser(userEmail);
@@ -201,143 +189,142 @@ export class DriveBackupPage {
     log(`[Zoho Backup Suite] Drive comparison completed for ${user.email}.`);
   }
 
-  async exportRandomSnapshotEntriesAndWait(userEmail: string): Promise<DriveExportResult> {
-    await this.openUsersTab();
-    const user = await this.selectUser(userEmail);
 
-    await this.openExportsTab();
-    const previousRows = await this.readExportHistoryRows();
-    await this.openUsersTab();
-    await this.selectUser(user.email);
+  async getBackupHistoryState(user: DriveUser): Promise<BackupHistoryState> {
+    await this.locators.backupsTab.click();
 
-    const candidates = await this.getVisibleExportCandidates();
-    const selectedEntries = chooseRandomDriveExportEntries(candidates);
-    for (const entry of selectedEntries) {
-      await entry.checkbox.check();
+    const tabPanel = this.locators.historyPanel;
+    await this.filterBackupHistoryByUser(tabPanel, user.name);
+    const range = this.locators.pageRange(tabPanel);
+    await expect(range).toBeVisible();
+    const countMatch = (await range.innerText()).match(/of\s+(\d+)/);
+    if (!countMatch) {
+      throw new Error('Could not read the Drive backup history row count.');
     }
 
-    await expect(this.locators.snapshotExportButton).toBeEnabled();
-    log(`[Zoho C2C Drive] Preparing export for ${selectedEntries.map(({ path }) => path).join(', ')}.`);
-    await this.locators.snapshotExportButton.click();
-    await expect(this.locators.exportDialog).toBeVisible({ timeout: 15_000 });
-    await expect(this.locators.selectedItemsRadio).toBeChecked();
-    const exportStartedAt = Date.now();
-    await this.locators.confirmExportButton.click();
-    await expect(this.locators.exportDialog).toBeHidden({ timeout: 30_000 });
-    log(`[Zoho C2C Drive] Submitted export for ${selectedEntries.map(({ path }) => path).join(', ')}.`);
+    const rows = this.locators.historyRows();
+    const rowCount = await rows.count();
 
-    await this.openExportsTab();
-    let latestStatus: string | undefined;
+    for (let index = 1; index < rowCount; index++) {
+      const cells = await this.locators.rowCells(this.locators.rowAt(rows, index)).allInnerTexts();
+      if (cells[1]?.trim() === user.email && cells[0]?.trim()) {
+        return {
+          timestamp: cells[0].trim(),
+          status: cells[2]?.trim() ?? '',
+          totalCount: Number(countMatch[1]),
+        };
+      }
+    }
+
+    return {
+      timestamp: '',
+      status: '',
+      totalCount: Number(countMatch[1]),
+    };
+  }
+
+  private async findSnapshotEntry(entryName: string): Promise<boolean> {
+    const range = this.locators.snapshotRange;
+
+    for (; ;) {
+      await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
+      await expect(range).toBeVisible();
+
+      const rows = this.locators.tableRows(this.locators.snapshotTable);
+      const rowCount = await rows.count();
+      for (let index = 1; index < rowCount; index++) {
+        const cells = await this.locators.rowCells(this.locators.rowAt(rows, index)).allInnerTexts();
+        if (cells[1]?.trim() === entryName) {
+          log(`[Zoho backup] Verified snapshot contains "${entryName}".`);
+          return true;
+        }
+      }
+
+      const currentRange = await range.innerText();
+      const nextPage = this.locators.snapshotNextPageButton;
+      if (await nextPage.isDisabled()) {
+        break;
+      }
+
+      await nextPage.click();
+      await expect(range).not.toHaveText(currentRange);
+    }
+
+    return false;
+  }
+
+  async waitForLatestBackupCompleted(user: DriveUser, previousState: BackupHistoryState): Promise<void> {
+    log(`[Zoho backup] Checking Backups history for ${user.email}.`);
+    await this.locators.backupsTab.click();
+
+    const tabPanel = this.locators.historyPanel;
+    await this.filterBackupHistoryByUser(tabPanel, user.name);
+
+    const readLatestUserBackup = async (): Promise<BackupHistoryState | undefined> => {
+      const range = this.locators.historyRange;
+      const countMatch = (await range.innerText()).match(/of\s+(\d+)/);
+      if (!countMatch) {
+        return undefined;
+      }
+
+      const rows = this.locators.historyRows();
+      const rowCount = await rows.count();
+
+      for (let index = 1; index < rowCount; index++) {
+        const cells = await this.locators.rowCells(this.locators.rowAt(rows, index)).allInnerTexts();
+        if (cells[1]?.trim() === user.email) {
+          return {
+            timestamp: cells[0]?.trim() ?? '',
+            status: cells[2]?.trim() ?? '',
+            totalCount: Number(countMatch[1]),
+          };
+        }
+      }
+    };
+
+    let previousStatus = '';
     await expect.poll(async () => {
-      await this.refreshExportsTab();
-      const currentRows = await this.readExportHistoryRows();
-      const previousText = new Set(previousRows.map(({ text }) => text));
-      const newRow = currentRows.find(({ text }) => !previousText.has(text));
-      if (!newRow) {
-        return '';
+      await this.locators.historySearchButton.click();
+      await expect(this.locators.pageLoading(tabPanel)).toBeHidden({ timeout: 30_000 });
+
+      const latestBackup = await readLatestUserBackup();
+      const status = latestBackup?.status ?? 'No history entry';
+      if (status !== previousStatus) {
+        log(`[Zoho backup] ${user.email} backup history status: ${status}.`);
+        previousStatus = status;
       }
 
-      const status = newRow.cells.find((cell) => /\b(?:active|failed)\b/i.test(cell))?.trim();
-      if (status && /^failed\b/i.test(status)) {
-        throw new Error(
-          `Drive export failed for ${user.email} after selecting ${selectedEntries.map(({ path }) => path).join(', ')}. Row: ${newRow.text}`,
-        );
+      const isNewBackup = latestBackup !== undefined && (
+        latestBackup.timestamp !== previousState.timestamp ||
+        latestBackup.totalCount > previousState.totalCount
+      );
+      if (isNewBackup) {
+        expect(latestBackup.status, `Backup failed for ${user.email}.`).not.toMatch(/fail/i);
       }
-      latestStatus = status;
-      return status ?? '';
+
+      return isNewBackup && latestBackup.status === 'Completed';
     }, {
-      timeout: 10 * 60_000,
-      intervals: [2_000, 5_000],
-      message: `Waiting for the Drive export for ${user.email} to become Active.`,
-    }).toMatch(/^active$/i);
+      timeout: 8 * 60_000,
+      intervals: [5_000],
+    }).toBe(true);
 
-    const elapsedSeconds = ((Date.now() - exportStartedAt) / 1000).toFixed(1);
-    log(`[Zoho C2C Drive] Export for ${user.email} reached ${latestStatus} in ${elapsedSeconds}s.`);
-    return { selectedEntries, status: 'Active' };
-  }
-
-  private async openExportsTab(): Promise<void> {
-    await expect(this.locators.exportsTab).toBeVisible({ timeout: 30_000 });
-    await this.locators.exportsTab.click();
-    await expect(this.locators.exportsTab).toHaveAttribute('aria-selected', 'true');
-    await expect(this.locators.exportsTable).toBeVisible({ timeout: 30_000 });
-  }
-
-  private async refreshExportsTab(): Promise<void> {
-    await this.page.reload({ waitUntil: 'domcontentloaded' });
-    await this.openExportsTab();
-  }
-
-  private async readExportHistoryRows(): Promise<ExportHistoryRow[]> {
-    await expect(this.locators.exportsTab).toHaveAttribute('aria-selected', 'true');
-    await expect(this.locators.exportsTable).toBeVisible({ timeout: 30_000 });
-    await expect(this.locators.exportsLoading).toBeHidden({ timeout: 60_000 });
-    const rows = this.locators.exportRows();
-    const result: ExportHistoryRow[] = [];
-    for (let index = 1; index < await rows.count(); index++) {
-      const row = rows.nth(index);
-      const cells = (await this.locators.rowCells(row).allInnerTexts()).map((cell) => cell.trim());
-      result.push({ text: cells.join(' | '), cells });
+    const latestBackup = await readLatestUserBackup();
+    if (!latestBackup) {
+      throw new Error(`No backup history entry was found for ${user.email} after the backup completed.`);
     }
-    return result;
+
+    this.assertions.expectLatestBackupCompleted(user, previousState, latestBackup);
   }
 
-  private async getVisibleExportCandidates(): Promise<ExportCandidate[]> {
-    await expect(this.locators.snapshotLoading).toBeHidden({ timeout: 30_000 });
-    await expect(this.locators.snapshotRange).toBeVisible({ timeout: 30_000 });
-    const rows = this.locators.tableRows(this.locators.snapshotTable);
-    const candidates: ExportCandidate[] = [];
-
-    for (let index = 1; index < await rows.count(); index++) {
-      const row = rows.nth(index);
-      const cells = await this.locators.rowCells(row).allInnerTexts();
-      const name = cells[1]?.trim() ?? '';
-      const type = cells[2]?.trim();
-      if (!name || (type !== backupLabels.folderType && type !== backupLabels.fileType)) {
-        continue;
-      }
-
-      const checkbox = row.getByRole('checkbox');
-      if (await checkbox.count() !== 1 || !(await checkbox.isEnabled())) {
-        continue;
-      }
-      candidates.push({
-        name,
-        type,
-        path: name,
-        checkbox,
-      });
+  private async filterBackupHistoryByUser(tabPanel: Locator, userName: string): Promise<void> {
+    const selectedUser = this.locators.userSelector(tabPanel, userName);
+    if (!(await selectedUser.isVisible())) {
+      await this.locators.selectUserButton(tabPanel).click();
+      await this.locators.userOption(userName).click();
     }
-    if (candidates.length === 0) {
-      throw new Error('The selected Drive snapshot page has no selectable files or folders to export.');
-    }
-    return candidates;
+
+    await this.locators.historySearchButton.click();
+    await expect(this.locators.pageLoading(tabPanel)).toBeHidden({ timeout: 30_000 });
+    await expect(this.locators.pageRange(tabPanel)).toBeVisible();
   }
-
-}
-
-export function chooseRandomDriveExportEntries<T extends Pick<DriveSnapshotEntry, 'type'>>(
-  entries: T[],
-  random: () => number = Math.random,
-): T[] {
-  const remaining = [...entries];
-  const selected: T[] = [];
-  const pickOne = (type: DriveSnapshotEntry['type']): void => {
-    const matching = remaining.filter((entry) => entry.type === type);
-    if (matching.length === 0) {
-      return;
-    }
-    const index = Math.floor(random() * matching.length);
-    const [entry] = matching.splice(index, 1);
-    selected.push(entry);
-    remaining.splice(remaining.indexOf(entry), 1);
-  };
-
-  pickOne('File');
-  pickOne('Folder');
-  while (selected.length < 3 && remaining.length > 0) {
-    const index = Math.floor(random() * remaining.length);
-    selected.push(remaining.splice(index, 1)[0]);
-  }
-  return selected;
 }

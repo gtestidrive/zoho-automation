@@ -1,5 +1,6 @@
 import { test } from '@playwright/test';
 import { ZohoWorkDriveApi } from '../../../pages/drive/api/zoho-workdrive.api';
+import { OAuthPage } from '../../../pages/oauth.page';
 import { testSettings } from '../../../test-settings';
 
 // Run this opt-in headed test only when initially authorizing or intentionally switching WorkDrive accounts.
@@ -11,5 +12,5 @@ test('authorizes Zoho WorkDrive API with OAuth', async ({ page }) => {
   test.setTimeout(16 * 60_000);
 
   const workDriveApi = new ZohoWorkDriveApi(testSettings.zohoWorkDrive);
-  await workDriveApi.authorize(page);
+  await workDriveApi.authorize(new OAuthPage(page).open);
 });

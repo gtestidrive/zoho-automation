@@ -19,6 +19,12 @@ export function contactSummariesChecksum(contacts: ContactSummary[]): string {
 }
 
 export class ContactsBackupAssertions {
+  expectAccountEmail(email: string, accounts: { authorized: string; selected: string }): void {
+    if (accounts.authorized !== accounts.selected) {
+      throw new Error(`Zoho Contacts OAuth account does not match the C2C user ${email}. Reauthorize with the correct account.`);
+    }
+  }
+
   expectSnapshotMatchesNativeContacts(
     sourceContacts: ZohoContact[],
     snapshotContacts: C2cSnapshotContact[],

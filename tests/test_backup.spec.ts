@@ -1,14 +1,16 @@
 import { expect, test } from '@playwright/test';
 import { setupNativeCalendar, signInToCalendarC2C } from '../pages/calendar/backup/calendar_backup_config';
+import { printZohoContacts } from '../pages/contacts/api/zoho-contacts.api';
+import { ContactsBackupAssertions } from '../pages/contacts/backup/contacts-backup.assertions';
 import {
   setupNativeContacts, signInToContactsC2C,
 } from '../pages/contacts/backup/contacts_backup_config';
-import { printZohoContacts, zohoContactsChecksum } from '../pages/contacts/api/zoho-contacts.api';
+import { zohoContactsChecksum } from '../pages/contacts/restore/contacts-restore.assertions';
+import { setupDriveBackup } from '../pages/drive/backup/drive_backup_config';
 import {
   openMailRecovery, setupNativeMail, signInToMailC2C,
 } from '../pages/mail/backup/mail_backup_config';
 import { setupTeamFolders } from '../pages/team-folder/backup/team_folder_backup_config';
-import { setupDriveBackup } from '../pages/drive/backup/drive_backup_config';
 
 const suiteEnabled = process.env.RUN_ZOHO_BACKUP_SUITE === '1';
 
@@ -19,7 +21,7 @@ test.describe('Zoho backup and snapshot comparison suite', () => {
     test.skip(!suiteEnabled, 'Opt in by setting RUN_ZOHO_BACKUP_SUITE=1 to run live backups and comparisons.');
   });
 
-  
+
   test('Drive: back up and compare the latest snapshot', { tag: '@zoho' }, async ({ page }) => {
     test.setTimeout(60 * 60_000);
 
@@ -40,7 +42,7 @@ test.describe('Zoho backup and snapshot comparison suite', () => {
 
     await test.step(
       'Compare the C2C snapshot with Zoho Drive',
-      () => drivePage.expectSnapshotMatchesNativeDrive(email),
+      () => drivePage.compareSnapshotWithNativeDrive(email),
     );
   });
 
@@ -49,7 +51,7 @@ test.describe('Zoho backup and snapshot comparison suite', () => {
     test.setTimeout(60 * 60_000);
     const { email, contactsPage, contactsApi } = setupNativeContacts(page);
     const sourceContacts = await test.step('Capture native Zoho Contacts before backup', async () => {
-      await contactsApi.expectAccountEmail(email);
+      new ContactsBackupAssertions().expectAccountEmail(email, await contactsApi.readAccountIds(email));
       const contacts = await contactsApi.listContacts();
       printZohoContacts(contacts);
       if (contacts.length === 0) {
@@ -74,7 +76,7 @@ test.describe('Zoho backup and snapshot comparison suite', () => {
     });
 
     await test.step('Compare Zoho Contacts with the C2C snapshot', () =>
-      contactsPage.expectSnapshotMatchesNativeContacts(
+      new ContactsBackupAssertions().expectSnapshotMatchesNativeContacts(
         sourceContacts, snapshotContacts,
       ));
   });
@@ -99,7 +101,7 @@ test.describe('Zoho backup and snapshot comparison suite', () => {
       calendarPage.readSnapshot(email));
 
     await test.step('Compare Zoho Calendar events with the C2C snapshot', () =>
-      calendarPage.expectSnapshotMatchesNativeCalendar(calendarApi, snapshot, testEvent));
+      calendarPage.compareSnapshotWithNativeCalendar(calendarApi, snapshot, testEvent));
   });
 
 

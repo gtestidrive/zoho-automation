@@ -1,8 +1,7 @@
-import { createServer, type Server } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { dirname } from 'node:path';
-import type { Page } from '@playwright/test';
 
 export type ZohoMailSettings = {
   testRecipientEmail: string;
@@ -21,6 +20,7 @@ type SavedToken = {
 };
 
 export type ZohoMailMessage = {
+  id?: string;
   from: string;
   to: string;
   subject: string;
@@ -167,9 +167,9 @@ export class ZohoMailApi {
   private accessToken: string | undefined;
   private readonly accounts = new Map<string, ZohoMailAccount>();
 
-  constructor(private readonly settings: ZohoMailSettings) {}
+  constructor(private readonly settings: ZohoMailSettings) { }
 
-  async authorize(page: Page): Promise<void> {
+  async authorize(openAuthorizationPage: (url: string) => Promise<void>): Promise<void> {
     if (!this.settings.clientId || !this.settings.clientSecret) {
       throw new Error('Set ZOHO_MAIL_CLIENT_ID and ZOHO_MAIL_CLIENT_SECRET before setting up Zoho Mail OAuth.');
     }
@@ -230,7 +230,7 @@ export class ZohoMailApi {
         state,
       }).toString();
       console.log('[Zoho Mail OAuth] Approve account, folder, message read, and message create access in the browser.');
-      await page.goto(authorizeUrl.toString(), { waitUntil: 'domcontentloaded' });
+      await openAuthorizationPage(authorizeUrl.toString());
 
       const timeout = setTimeout(() => {
         rejectCode(new Error('Zoho Mail OAuth authorization timed out after 15 minutes.'));
@@ -355,7 +355,7 @@ export class ZohoMailApi {
     return folders;
   }
 
-  private async listMessages(accountId: string, folderId: string): Promise<ZohoMailMessage[]> {
+  async listMessages(accountId: string, folderId: string): Promise<ZohoMailMessage[]> {
     const messages: ZohoMailMessage[] = [];
     // Zoho Mail uses a 1-based start index and accepts at most 200 records per page.
     for (let start = 1; ; start += mailPageSize) {
@@ -366,7 +366,10 @@ export class ZohoMailApi {
       url.searchParams.set('status', 'all');
       url.searchParams.set('includeto', 'true');
       const body = await this.getJson(url);
-      const page = recordsFrom(body, 'data').map(messageFrom);
+      const page = recordsFrom(body, 'data').map((record) => ({
+        ...messageFrom(record),
+        id: stringValue(record, ['messageId', 'messageid', 'id']),
+      }));
       messages.push(...page);
       log(`[Zoho Mail API] Read ${page.length} message records from page starting at ${start}.`);
       if (page.length < mailPageSize) {
@@ -376,6 +379,33 @@ export class ZohoMailApi {
         throw new Error(`Zoho Mail returned an empty message page for folder ${folderId}.`);
       }
     }
+  }
+
+  async listFolderMessages(email: string, folderPath: string): Promise<{ account: ZohoMailAccount; messages: ZohoMailMessage[] }> {
+    const account = await this.getAccount(email);
+    const body = await this.getJson(this.accountUrl(account.id, 'folders'));
+    const folders = recordsFrom(body, 'data').map((record) => {
+      const id = stringValue(record, ['folderId', 'folderid', 'id']);
+      const name = stringValue(record, ['folderName', 'foldername', 'name']);
+      if (!id || !name) {
+        throw new Error('Zoho Mail returned a folder without an ID or name.');
+      }
+      return { id, name, parentId: stringValue(record, ['parentFolderId', 'parentfolderid', 'parentId']) };
+    });
+    const paths = folderPaths(folders);
+    const matches = folders.filter(({ id }) => paths.get(id)?.toLowerCase() === folderPath.toLowerCase());
+    if (matches.length !== 1) {
+      throw new Error(`Expected one Zoho Mail folder "${folderPath}", found ${matches.length}.`);
+    }
+    return { account, messages: await this.listMessages(account.id, matches[0].id) };
+  }
+
+  async getOriginalMessage(accountId: string, messageId: string): Promise<Uint8Array> {
+    const body = await this.getJson(this.accountUrl(accountId, `messages/${encodeURIComponent(messageId)}/originalmessage`));
+    if (!isRecord(body.data) || typeof body.data.content !== 'string' || !body.data.content) {
+      throw new Error(`Zoho Mail original message ${messageId} has no MIME content.`);
+    }
+    return Buffer.from(body.data.content, 'utf8');
   }
 
   private accountUrl(accountId: string, resource: string): URL {

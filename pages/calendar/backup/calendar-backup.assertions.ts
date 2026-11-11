@@ -3,8 +3,8 @@ import {
   parseCalendarDate,
   type CalendarDateRange,
   type ZohoCalendar,
-  type ZohoCalendarApi,
   type ZohoCalendarEvent,
+  type ZohoCalendarInventory,
   type ZohoCalendarTestEvent,
 } from '../api/zoho-calendar.api';
 import type { CalendarSnapshot } from './calendar-backup.page';
@@ -130,20 +130,11 @@ export function compareCalendarFolders(
 }
 
 export class CalendarBackupAssertions {
-  async expectSnapshotMatchesNativeCalendar(
-    calendarApi: ZohoCalendarApi,
+  expectSnapshotMatchesNativeCalendar(
+    inventory: ZohoCalendarInventory,
     snapshot: CalendarSnapshot,
     testEvent: ZohoCalendarTestEvent,
-    rangeStart: string,
-    rangeEnd: string,
-  ): Promise<void> {
-    const range = calendarComparisonRange(
-      [...snapshot.events.map((event) => event.start), testEvent.start],
-      rangeStart,
-      rangeEnd,
-    );
-    const inventory = await calendarApi.listCalendarInventory(range.start, range.end);
-
+  ): void {
     expect(inventory.events.some((event) => event.title === testEvent.title),
       `The test event "${testEvent.title}" was not found in native Zoho Calendar.`).toBe(true);
     expect(snapshot.events.some((event) => event.title === testEvent.title),

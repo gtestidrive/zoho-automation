@@ -1,4 +1,5 @@
 import { expect, type Locator, type Page } from '@playwright/test';
+import { HomeLocators } from './home.locators';
 
 export class HomePage {
   readonly page: Page;
@@ -6,7 +7,7 @@ export class HomePage {
 
   constructor(page: Page) {
     this.page = page;
-    this.getStartedLink = page.getByRole('link', { name: 'Get started' });
+    this.getStartedLink = new HomeLocators(page).getStartedLink;
   }
 
   async open(): Promise<void> {
